@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -22,6 +23,21 @@ async def init_bot() -> Bot:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     return bot
+
+async def health_check(request):
+    """Dummy health check endpoint for Render."""
+    return web.Response(text="Bot is alive!")
+
+async def start_dummy_server():
+    """Starts a dummy aiohttp server to bind a port for Render."""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"Dummy web server started on http://0.0.0.0:{port}")
 
 async def main():
     # Setup basic logging
@@ -59,6 +75,9 @@ async def main():
     
     logger.info("Starting polling...")
     try:
+        # Start dummy web server for Render binding
+        await start_dummy_server()
+        
         # Skip previously sent updates to avoid processing old messages
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
