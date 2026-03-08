@@ -29,15 +29,14 @@ def parse_pdf_pages(pdf_bytes: bytes) -> list[str]:
     return pages
 
 def get_page_image(pdf_bytes: bytes, page_idx: int) -> bytes | None:
-    """Extracts the first image found on a specific page."""
+    """Renders the entire PDF page to an image to capture charts and visually complex text."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         page = doc[page_idx]
-        images = page.get_images(full=True)
-        if images:
-            xref = images[0][0]
-            base_image = doc.extract_image(xref)
-            return base_image.get("image")
+        # Use matrix for slightly higher resolution (1.5x zoom)
+        mat = fitz.Matrix(1.5, 1.5)
+        pix = page.get_pixmap(matrix=mat)
+        return pix.tobytes("jpeg")
     except Exception as e:
         logger.error(f"Error extracting image from PDF page {page_idx}: {e}")
     finally:
@@ -64,12 +63,7 @@ async def send_pdf_page(message: Message, bot: Bot, state: FSMContext):
 
     page_text = pages_text[current_page]
     
-    # If the page is mostly empty, automatically jump to next
-    if len(page_text.strip()) < 50:
-        await state.update_data(current_page=current_page + 1)
-        return await send_pdf_page(message, bot, state)
-
-    wait_msg = await bot.send_message(message.chat.id, f"📖 Анализирую страницу {current_page + 1}...")
+    wait_msg = await bot.send_message(message.chat.id, f"📖 Анализирую страницу {current_page + 1} из {len(pages_text)}...")
 
     try:
         # Extract images off the event loop
