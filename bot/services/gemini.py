@@ -21,8 +21,8 @@ class GeminiService:
         
         current_key = self.api_keys[self.current_key_idx]
         genai.configure(api_key=current_key)
-        # We recommend gemini-1.5-flash for the perfect balance of speed and multi-modal readiness
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        # We recommend gemini-1.5-flash-latest for the perfect balance of speed and multi-modal readiness
+        self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
         logger.info(f"Configured Gemini API with key index {self.current_key_idx}.")
 
     def _rotate_key(self):
