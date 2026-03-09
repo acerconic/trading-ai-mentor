@@ -10,15 +10,19 @@ from config import ADMIN_ID
 start_router = Router()
 logger = logging.getLogger(__name__)
 
-def get_main_menu():
-    """Главное меню бота"""
+def get_main_menu(user_id: int = 0):
+    """Главное меню бота. Кнопка Admin Panel видна только администратору."""
     builder = ReplyKeyboardBuilder()
     builder.button(text="📚 Новая тема")
     builder.button(text="📝 Практика")
     builder.button(text="👤 Мой Профиль")
     builder.button(text="🌐 Язык")
     builder.button(text="🧹 Сброс памяти")
-    builder.adjust(2, 2, 1)
+    if user_id == ADMIN_ID:
+        builder.button(text="🔧 Admin Panel")
+        builder.adjust(2, 2, 1, 1)
+    else:
+        builder.adjust(2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def get_language_kb() -> InlineKeyboardMarkup:
@@ -73,4 +77,4 @@ async def cmd_start(message: Message, bot: Bot):
         elif user["language"] is None:
             await message.answer("Пожалуйста, выберите язык / Iltimos, tilni tanlang:", reply_markup=get_language_kb())
         else:
-            await message.answer("Добро пожаловать обратно!", reply_markup=get_main_menu())
+            await message.answer("Добро пожаловать обратно!", reply_markup=get_main_menu(user_id))

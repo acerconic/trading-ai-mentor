@@ -1,11 +1,6 @@
 import asyncio
 import logging
 import os
-try:
-    import uvloop
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-except ImportError:
-    pass
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher
@@ -94,6 +89,11 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        # Use uvloop if available (Linux/Render), otherwise standard asyncio
+        try:
+            import uvloop
+            uvloop.run(main())
+        except ImportError:
+            asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logging.info("Bot stopped correctly.")

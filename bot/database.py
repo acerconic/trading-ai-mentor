@@ -136,9 +136,19 @@ class Database:
         try:
             async with aiosqlite.connect(DB_NAME) as db:
                 db.row_factory = aiosqlite.Row
-                async with db.execute("SELECT * FROM users") as cursor:
+                async with db.execute("SELECT * FROM users ORDER BY is_approved DESC, studied_books DESC") as cursor:
                     rows = await cursor.fetchall()
                     return [dict(row) for row in rows]
         except Exception as e:
             logging.error(f"Error getting all users: {e}")
             return []
+
+    @staticmethod
+    async def delete_user(telegram_id: int) -> None:
+        """Deletes a user from the database."""
+        try:
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
+                await db.commit()
+        except Exception as e:
+            logging.error(f"Error deleting user {telegram_id}: {e}")
