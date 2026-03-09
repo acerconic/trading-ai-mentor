@@ -1,79 +1,124 @@
 import logging
-import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted, GoogleAPIError
-
-from config import GEMINI_API_KEYS
+import base64
+import json
+from openai import AsyncOpenAI
+from config import GROQ_API_KEY, OPENROUTER_API_KEY, CEREBRAS_API_KEY, TOGETHER_API_KEY
 
 logger = logging.getLogger(__name__)
 
-class GeminiService:
+class AIManagerService:
     def __init__(self):
-        self.api_keys = GEMINI_API_KEYS
-        self.current_key_idx = 0
-        self.model = None
-        self._configure_client()
-
-    def _configure_client(self):
-        """Initializes client with the current active key."""
-        if not self.api_keys:
-            logger.error("No Gemini API keys provided in configuration.")
-            return
+        # Configure Async Clients for each provider
+        self.clients = {}
         
-        current_key = self.api_keys[self.current_key_idx]
-        genai.configure(api_key=current_key)
-        # We recommend gemini-1.5-flash-latest for the perfect balance of speed and multi-modal readiness
-        self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        logger.info(f"Configured Gemini API with key index {self.current_key_idx}.")
+        if OPENROUTER_API_KEY:
+            self.clients['openrouter'] = AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=OPENROUTER_API_KEY,
+            )
+        if GROQ_API_KEY:
+            self.clients['groq'] = AsyncOpenAI(
+                base_url="https://api.groq.com/openai/v1",
+                api_key=GROQ_API_KEY
+            )
+        if CEREBRAS_API_KEY:
+            self.clients['cerebras'] = AsyncOpenAI(
+                base_url="https://api.cerebras.ai/v1",
+                api_key=CEREBRAS_API_KEY
+            )
+        if TOGETHER_API_KEY:
+             self.clients['together'] = AsyncOpenAI(
+                base_url="https://api.together.xyz/v1",
+                api_key=TOGETHER_API_KEY
+            )
 
-    def _rotate_key(self):
-        """Rotates the API key upon encountering rate limits."""
-        self.current_key_idx = (self.current_key_idx + 1) % len(self.api_keys)
-        logger.warning(f"Rotating Gemini API Key. Switched to index {self.current_key_idx}.")
-        self._configure_client()
-
-    async def _generate_content_with_retry(self, contents: list, retries: int = None) -> str | None:
-        """Helper to call Gemini API with key rotation on ResourceExhausted (429)."""
-        if retries is None:
-            # Try enough times to loop through all available keys
-            retries = len(self.api_keys) + 1 
-
-        for attempt in range(retries):
-            try:
-                response = await self.model.generate_content_async(contents)
-                return response.text
-            except ResourceExhausted as e:
-                logger.warning(f"ResourceExhausted (429) on key index {self.current_key_idx}. Attempt {attempt + 1}/{retries}.")
-                self._rotate_key()
-            except GoogleAPIError as e:
-                logger.error(f"GoogleAPIError during generation: {e}")
-                if attempt == retries - 1:
-                    return None
-            except Exception as e:
-                logger.error(f"Unexpected error in Gemini API call: {e}")
-                return None
+        # Priority list for text-only tasks
+        self.text_priority = ['cerebras', 'groq', 'openrouter', 'together']
+        # Route mapping for text tasks
+        self.text_models = {
+            'cerebras': 'llama-3.3-70b',
+            'groq': 'llama-3.3-70b-versatile',
+            'openrouter': 'qwen/qwen3-coder:free',
+            'together': 'meta-llama/Llama-3-70b-chat-hf'
+        }
+        
+    async def _generate_text_fallback(self, prompt: str) -> str | None:
+        """Tries text generation across multiple fast providers until success."""
+        if not self.clients:
+             logger.error("No API keys configured!")
+             return None
+             
+        for provider in self.text_priority:
+            if provider not in self.clients:
+                continue
                 
-        logger.error("All Gemini API retries exhausted.")
+            client = self.clients[provider]
+            model_name = self.text_models[provider]
+            
+            try:
+                logger.info(f"Attempting text generation via {provider} ({model_name})...")
+                response = await client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=2048,
+                    temperature=0.3
+                )
+                logger.info(f"Success via {provider}!")
+                return response.choices[0].message.content
+            except Exception as e:
+                logger.warning(f"Failed via {provider}: {e}. Trying next provider...")
+                continue
+                
+        logger.error("All text providers failed.")
         return None
 
+    async def _generate_vision(self, prompt: str, image_bytes: bytes) -> str | None:
+        """Vision tasks strictly require OpenRouter currently."""
+        if 'openrouter' not in self.clients:
+            logger.error("Vision task requested but OpenRouter key is not set.")
+            return None
+            
+        client = self.clients['openrouter']
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        
+        try:
+            logger.info("Attempting vision generation via OpenRouter (google/gemini-2.5-flash-free)...")
+            response = await client.chat.completions.create(
+                model="google/gemini-2.5-flash-free", # Free robust vision model on OpenRouter
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=2048,
+                temperature=0.3
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"OpenRouter Vision API failed: {e}")
+            return None
+
     async def analyze_homework(self, image_bytes: bytes, prompt_text: str = "") -> str | None:
-        """Analyzes a student's trading chart homework."""
+        """Analyzes a student's trading chart homework using Vision."""
         sys_prompt = (
             "Ты профессиональный трейдер институционального уровня и строгий ментор. "
-            "Проверь график. Твой ответ ВСЕГДА из 3 блоков: "
-            "1. Краткая суть. "
-            "2. Детальный разбор (SMC, ICT). "
+            "Проверь график. Твой ответ ВСЕГДА из 3 блоков:\n"
+            "1. Краткая суть.\n"
+            "2. Детальный разбор (SMC, ICT).\n"
             "3. Вердикт (сдал/не сдал)."
         )
         
         full_text = f"{sys_prompt}\n\nДополнительный комментарий: {prompt_text}" if prompt_text else sys_prompt
-        
-        image_part = {
-            "mime_type": "image/jpeg", # Defaulting to jpeg, works perfectly for typical TG image bytes
-            "data": image_bytes
-        }
-        
-        contents = [full_text, image_part]
-        return await self._generate_content_with_retry(contents)
+        return await self._generate_vision(full_text, image_bytes)
 
     async def analyze_theory(self, text_chunk: str, image_bytes: bytes = None) -> str | None:
         """Processes and simplifies trading theory for a student."""
@@ -84,14 +129,11 @@ class GeminiService:
             f"Материал:\n{text_chunk}"
         )
         
-        contents = [prompt]
         if image_bytes:
-            contents.append({
-                "mime_type": "image/jpeg",
-                "data": image_bytes
-            })
-            
-        return await self._generate_content_with_retry(contents)
+            return await self._generate_vision(prompt, image_bytes)
+        else:
+            return await self._generate_text_fallback(prompt)
 
-# Ready-to-use Service Singleton
-gemini_service = GeminiService()
+# Ready-to-use routing Service Singleton
+gemini_service = AIManagerService() # Kept variable name 'gemini_service' to avoid editing ALL routers
+

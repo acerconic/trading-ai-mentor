@@ -11,9 +11,9 @@ try:
 except ValueError:
     ADMIN_ID = 217924651
 
-# Read GEMINI_API_KEYS (comma separated) and convert to a list
-gemini_keys_env = os.getenv(
-    "GEMINI_API_KEYS", 
-    "AIzaSyAsiAnmieeFo5csQnyMNjmD8XgQ814mEws,AIzaSyDEdCyHtYEfoU81A1Gck9Bqa8jKStcmmzI,AIzaSyDharJ7xfkoxHLlad0MHRhhoEUPeAX4vrI"
-)
-GEMINI_API_KEYS = [key.strip() for key in gemini_keys_env.split(",") if key.strip()]
+# Provider API Keys
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY", "")
+TRANSCRIPT_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "") # for potential future usage
