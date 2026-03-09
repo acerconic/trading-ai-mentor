@@ -17,9 +17,7 @@ logger = logging.getLogger(__name__)
 def parse_pdf_pages(pdf_bytes: bytes) -> list[str]:
     """Blocking function to extract text from all pages of a PDF."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    if doc.page_count > 200:
-        doc.close()
-        raise ValueError(f"Limit exceeded: {doc.page_count} > 200")
+    # Лимиты для одобренных пользователей сняты по просьбе администратора
     
     pages = []
     for i in range(doc.page_count):
@@ -52,7 +50,8 @@ def get_study_kb():
     """Inline keyboard for navigating PDF pages"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Всё понятно, идем дальше", callback_data="next_page")
-    builder.button(text="❓ Не понял, объясни иначе", callback_data="explain_more")
+    builder.button(text="📖 Не понял, объясни иначе", callback_data="explain_more")
+    builder.button(text="❓ У меня вопрос (спросить)", callback_data="ask_question_btn")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -81,7 +80,12 @@ async def send_pdf_page(message: Message, bot: Bot, state: FSMContext):
             await wait_msg.edit_text("❌ Ошибка при запросе к AI. Попробуйте еще раз.")
             return
 
-        text_to_send = f"📄 <b>Страница {current_page + 1}</b>\n\n{ai_response}"
+        # Убираем раздражающие звездочки (markdown), так как Telegram использует HTML parse_mode
+        import re
+        html_response = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', ai_response)
+        html_response = html_response.replace("*", "") # Убираем оставшиеся одиночные звездочки списков
+
+        text_to_send = f"📄 <b>Страница {current_page + 1}</b>\n\n{html_response}"
         
         await wait_msg.delete()
 
@@ -202,3 +206,29 @@ async def on_explain_more(callback: CallbackQuery, bot: Bot, state: FSMContext):
     except Exception as e:
         logger.error(f"Error on explain_more: {e}")
         await wait_msg.edit_text("❌ Произошла ошибка.")
+
+@study_router.callback_query(StudyState.reading_pdf, F.data == "ask_question_btn")
+async def process_ask_question_btn(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    lang = data.get("language", "ru")
+    prompt_text = "❓ Напишите свой вопрос или термин, который вам непонятен (например: 'Что такое Ордерблок?'):"
+    if lang == "uz":
+        prompt_text = "❓ Тушунмаган сўзингиз ёки саволингизни ёзинг (масалан: 'Orderblock нима?'):"
+        
+    await callback.message.answer(prompt_text)
+    await state.set_state(StudyState.asking_question)
+    await callback.answer()
+
+@study_router.message(StudyState.asking_question, F.text)
+async def process_user_question(message: Message, state: FSMContext):
+    from services.nlp import nlp_service
+    data = await state.get_data()
+    lang = data.get("language", "ru")
+    
+    answer = nlp_service.get_best_trading_fact(message.text, lang)
+    
+    # Strip markdown if needed, but NLP service returns standard strings.
+    await message.answer(f"🤖 <b>AI Ментор:</b>\n\n{answer}", parse_mode="HTML")
+    
+    # Return to reading state so they can continue doing 'Next page'
+    await state.set_state(StudyState.reading_pdf)

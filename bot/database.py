@@ -129,3 +129,16 @@ class Database:
             "hw_fails": fails,
             "winrate": round(winrate, 2)
         }
+
+    @staticmethod
+    async def get_all_users() -> list[dict]:
+        """Retrieves all users for the admin panel."""
+        try:
+            async with aiosqlite.connect(DB_NAME) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute("SELECT * FROM users") as cursor:
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
+        except Exception as e:
+            logging.error(f"Error getting all users: {e}")
+            return []
