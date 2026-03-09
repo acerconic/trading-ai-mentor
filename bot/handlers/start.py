@@ -36,6 +36,13 @@ async def cmd_start(message: Message, bot: Bot):
     user = await Database.get_user(user_id)
     
     if not user:
+        if str(user_id) == str(ADMIN_ID):
+            # Admin is automatically added and approved
+            await Database.add_user(user_id, username)
+            await Database.update_approval(user_id, is_approved=True)
+            await message.answer("Добро пожаловать, Админ! Пожалуйста, выберите язык:", reply_markup=get_language_kb())
+            return
+            
         # Новый юзер - добавляем в БД
         await Database.add_user(user_id, username)
         await message.answer("🔒 Доступ закрыт. Ваша заявка отправлена администратору.")
@@ -48,7 +55,7 @@ async def cmd_start(message: Message, bot: Bot):
         try:
             await bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"🔔 <b>Новая заявка на доступ:</b>\nПользователь: @{username}\nID: <code>{user_id}</code>",
+                text=f"🔔 <b>Новая заявка на доступ:</b>\nПользователь: @{username}\nID: <code>{user_id}</code>\nЗаявка ожидает одобрения.",
                 reply_markup=admin_kb.as_markup()
             )
         except Exception as e:
@@ -56,6 +63,11 @@ async def cmd_start(message: Message, bot: Bot):
             
     else:
         # Юзер уже есть в БД
+        if str(user_id) == str(ADMIN_ID) and not user["is_approved"]:
+            await Database.update_approval(user_id, is_approved=True)
+            await message.answer("Доступ Админа восстановлен! Выберите язык:", reply_markup=get_language_kb())
+            return
+            
         if not user["is_approved"]:
             await message.answer("Ваша заявка еще на рассмотрении.")
         elif user["language"] is None:
