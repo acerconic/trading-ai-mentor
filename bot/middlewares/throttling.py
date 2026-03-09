@@ -11,8 +11,17 @@ from config import ADMIN_ID
 
 logger = logging.getLogger(__name__)
 
+
 class ThrottlingMiddleware(BaseMiddleware):
-    def __init__(self, limit: float = 3.0):  # 3 sec is enough to prevent spam
+    """
+    Anti-spam protection.
+    Rules:
+      - Admin          → always bypassed
+      - Approved users → always bypassed (admin trusted them manually)
+      - Unknown/new/unapproved users → 5-sec cooldown
+      - /start command → always bypassed (needed for onboarding)
+    """
+    def __init__(self, limit: float = 5.0):
         self.limit = limit
         self.user_timers: dict[int, float] = {}
 
@@ -22,46 +31,52 @@ class ThrottlingMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
-        
+
         if not isinstance(event, Message):
             return await handler(event, data)
-            
+
         user_id = event.from_user.id
-        
-        # Skip throttling for admin
+
+        # 1. Admin — no throttle
         if str(user_id) == str(ADMIN_ID):
             return await handler(event, data)
-            
+
+        # 2. /start — no throttle (required for onboarding flow)
+        if event.text and event.text.startswith("/start"):
+            return await handler(event, data)
+
+        # 3. Approved users — no throttle (admin already trusted them)
+        user = await Database.get_user(user_id)
+        if user and user.get("is_approved"):
+            return await handler(event, data)
+
+        # 4. Unknown / unapproved users — apply cooldown
         now = time.time()
-        
-        last_request_time = self.user_timers.get(user_id, 0.0)
-        time_passed = now - last_request_time
-        
-        if time_passed < self.limit:
-            wait_time = int(self.limit - time_passed)
-            
-            # Fetch user language from database
-            user = await Database.get_user(user_id)
-            lang = (user.get("language") or "RU").lower() if user else "ru"
-            
-            # Fallback if language isn't valid
+        last = self.user_timers.get(user_id, 0.0)
+        elapsed = now - last
+
+        if elapsed < self.limit:
+            wait = int(self.limit - elapsed)
+            lang = (user.get("language") or "ru").lower() if user else "ru"
             if lang not in TRADING_FACTS:
                 lang = "ru"
-            
+
             fact = random.choice(TRADING_FACTS[lang])
-            
-            if lang == "ru":
-                msg = f"⏳ <b>Анти-спам!</b> Пожалуйста, подождите {wait_time} сек.\n\n<i>А пока вот интересный факт:</i>\n{fact}"
+
+            if lang == "uz":
+                msg = (
+                    f"⏳ <b>Anti-spam!</b> Iltimos, {wait} soniya kuting.\n\n"
+                    f"<i>Kutish vaqtida qiziqarli fakt:</i>\n{fact}"
+                )
             else:
-                msg = f"⏳ <b>Анти-спам!</b> Илтимос, {wait_time} сония кутинг.\n\n<i>Кутиш вақтида қизиқарли факт:</i>\n{fact}"
-            
-            await event.answer(msg)
-            return # Stop processing the message
-            
-        # If passed the check, execute the handler
+                msg = (
+                    f"⏳ <b>Анти-спам!</b> Пожалуйста, подождите {wait} сек.\n\n"
+                    f"<i>А пока вот интересный факт:</i>\n{fact}"
+                )
+
+            await event.answer(msg, parse_mode="HTML")
+            return
+
         result = await handler(event, data)
-        
-        # Only update the timer IF the request was successfully processed (non-spam)
         self.user_timers[user_id] = time.time()
-        
         return result
