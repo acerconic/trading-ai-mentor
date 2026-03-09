@@ -82,9 +82,9 @@ class AIManagerService:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
         try:
-            logger.info("Attempting vision generation via OpenRouter (google/gemini-2.5-flash-free)...")
+            logger.info("Attempting vision generation via OpenRouter (google/gemini-1.5-flash)...")
             response = await client.chat.completions.create(
-                model="google/gemini-2.5-flash-free", # Free robust vision model on OpenRouter
+                model="google/gemini-1.5-flash", # Robust vision model on OpenRouter
                 messages=[
                     {
                         "role": "user",

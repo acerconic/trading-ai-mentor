@@ -7,6 +7,7 @@ from aiogram.types import Message, TelegramObject
 
 from database import Database
 from utils.constants import TRADING_FACTS
+from config import ADMIN_ID
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,11 @@ class ThrottlingMiddleware(BaseMiddleware):
             return await handler(event, data)
             
         user_id = event.from_user.id
+        
+        # Skip throttling for admin
+        if user_id == ADMIN_ID:
+            return await handler(event, data)
+            
         now = time.time()
         
         last_request_time = self.user_timers.get(user_id, 0.0)
