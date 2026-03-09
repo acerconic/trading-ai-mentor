@@ -13,7 +13,6 @@ except ValueError:
 
 # Provider API Keys
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY", "")
 TRANSCRIPT_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "") # for potential future usage
