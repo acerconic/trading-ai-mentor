@@ -33,6 +33,21 @@ def parse_pdf_pages(pdf_bytes: bytes) -> list[str]:
     
     return pages
 
+def get_page_image(pdf_bytes: bytes, page_idx: int) -> bytes | None:
+    """Renders the entire PDF page to an image to capture charts and visually complex text."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[page_idx]
+        # Use matrix for slightly higher resolution (1.5x zoom)
+        mat = fitz.Matrix(1.5, 1.5)
+        pix = page.get_pixmap(matrix=mat)
+        return pix.tobytes("jpeg")
+    except Exception as e:
+        logger.error(f"Error extracting image from PDF page {page_idx}: {e}")
+    finally:
+        doc.close()
+    return None
+
 def get_study_kb():
     """Inline keyboard for navigating PDF pages"""
     builder = InlineKeyboardBuilder()
@@ -56,6 +71,9 @@ async def send_pdf_page(message: Message, bot: Bot, state: FSMContext):
     wait_msg = await bot.send_message(message.chat.id, f"📖 Анализирую страницу {current_page + 1} из {len(pages_text)}...")
 
     try:
+        # Generate the page image for charts and visual context
+        img_bytes = await asyncio.to_thread(get_page_image, pdf_bytes, current_page)
+        
         # Analyze using Text-Only AI models (Groq, Cerebras)
         ai_response = await gemini_service.analyze_theory(page_text)
         
@@ -67,6 +85,12 @@ async def send_pdf_page(message: Message, bot: Bot, state: FSMContext):
         
         await wait_msg.delete()
 
+        # Send the chart/page photo first
+        if img_bytes:
+            image_file = BufferedInputFile(img_bytes, filename=f"page_{current_page}.jpg")
+            await bot.send_photo(message.chat.id, image_file)
+            
+        # Send the clean AI explanation below it
         if len(text_to_send) > 4096:
             text_to_send = text_to_send[:4090] + "..."
             

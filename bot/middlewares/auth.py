@@ -4,6 +4,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery, TelegramObject
 
 from database import Database
+from config import ADMIN_ID
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,10 @@ class AuthMiddleware(BaseMiddleware):
             
         # Allow /start command to pass through for onboarding
         if isinstance(event, Message) and text and text.startswith('/start'):
+            return await handler(event, data)
+            
+        # Complete bypass for admins
+        if str(user_id) == str(ADMIN_ID):
             return await handler(event, data)
             
         # Allow admin callbacks to pass through
