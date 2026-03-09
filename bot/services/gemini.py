@@ -1,3 +1,9 @@
+"""
+AI service layer.
+Vision  → OpenRouter free vision models (NO Google/Gemini)
+Text    → Groq, SambaNova, Hyperbolic, OpenRouter DeepSeek V3
+Auto-fallback: if one provider's tokens are exhausted → uses the next one.
+"""
 import base64
 import asyncio
 import logging
@@ -10,87 +16,149 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
-
 HTTPX_TIMEOUT = 90  # seconds
 
 # ─────────────────────────────────────────────────────────────────────────
-#  VISION via OpenRouter (FREE vision models — no Gemini key needed)
+#  VISION MODELS — free, NO Google, ordered by quality
 # ─────────────────────────────────────────────────────────────────────────
-# Best FREE vision models on OpenRouter (ordered by quality + generosity):
 VISION_MODELS = [
-    "google/gemini-2.0-flash-exp:free",        # Best quality vision, 1M context, FREE
-    "meta-llama/llama-4-maverick:free",         # Llama 4 Maverick, vision, FREE
-    "qwen/qwen2.5-vl-72b-instruct:free",        # Qwen VL 72B, very capable, FREE
-    "meta-llama/llama-4-scout:free",            # Llama 4 Scout, fast vision, FREE
+    "qwen/qwen2.5-vl-72b-instruct:free",  # Qwen VL 72B — best free vision
+    "meta-llama/llama-4-maverick:free",    # Llama 4 Maverick — multimodal, FREE
+    "meta-llama/llama-4-scout:free",       # Llama 4 Scout — fast vision, FREE
+    "mistralai/pixtral-12b:free",          # Pixtral 12B — Mistral vision, FREE
+]
+
+# ─────────────────────────────────────────────────────────────────────────
+#  TEXT MODELS — most generous free tiers, ordered by speed + quality
+# ─────────────────────────────────────────────────────────────────────────
+TEXT_MODELS_ON_OPENROUTER = [
+    "deepseek/deepseek-chat-v3-0324:free",       # DeepSeek V3 — 64k ctx, very generous
+    "meta-llama/llama-4-maverick:free",           # Llama 4 Maverick — huge ctx, top quality
+    "meta-llama/llama-3.3-70b-instruct:free",    # Llama 3.3 70B — solid fallback
 ]
 
 
 async def _call_vision(image_bytes: bytes, prompt: str) -> str | None:
     """
-    Sends an image + prompt to OpenRouter vision models.
-    Tries each free vision model in order until one succeeds.
+    Tries free non-Google vision models on OpenRouter in order.
+    Automatically switches to the next model on any error (rate limit, timeout, etc.)
     """
     if not OPENROUTER_API_KEY:
+        logger.error("OPENROUTER_API_KEY is not set! Cannot call vision.")
         return None
 
     b64 = base64.b64encode(image_bytes).decode("utf-8")
-    payload_content = [
+    content = [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-        {"type": "text", "text": prompt},
+        {"type": "text",      "text": prompt},
     ]
 
     for model in VISION_MODELS:
         try:
-            logger.info(f"→ Vision: trying {model}…")
+            logger.info(f"→ Vision: trying [{model}]…")
+            async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization":  f"Bearer {OPENROUTER_API_KEY}",
+                        "HTTP-Referer":   "https://trading-ai-mentor.onrender.com",
+                        "X-Title":        "Trade Mentor Bot",
+                        "Content-Type":   "application/json",
+                    },
+                    json={
+                        "model":       model,
+                        "messages":    [{"role": "user", "content": content}],
+                        "max_tokens":  2048,
+                        "temperature": 0.4,
+                    },
+                )
+
+            data       = resp.json()
+            status     = resp.status_code
+            error_info = data.get("error", {})
+
+            if status == 429:
+                logger.warning(f"✗ [{model}] rate limited (429) — trying next…")
+                continue
+            if status >= 400:
+                logger.warning(f"✗ [{model}] HTTP {status}: {error_info} — trying next…")
+                continue
+
+            text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            if text and len(text.strip()) > 15:
+                logger.info(f"✅ Vision success via [{model}]")
+                return text.strip()
+            else:
+                logger.warning(f"✗ [{model}] returned empty/short response — trying next…")
+
+        except httpx.TimeoutException:
+            logger.warning(f"✗ [{model}] timed out — trying next…")
+        except Exception as e:
+            logger.warning(f"✗ [{model}] exception: {e} — trying next…")
+
+    logger.error("All vision models failed!")
+    return None
+
+
+async def _call_openrouter_text(messages: list[dict]) -> str | None:
+    """Tries OpenRouter text-only models with auto-fallback."""
+    if not OPENROUTER_API_KEY:
+        return None
+
+    for model in TEXT_MODELS_ON_OPENROUTER:
+        try:
+            logger.info(f"→ OpenRouter text: trying [{model}]…")
             async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
                 resp = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "HTTP-Referer": "https://trading-ai-mentor.onrender.com",
-                        "X-Title": "Trade Mentor Bot",
-                        "Content-Type": "application/json",
+                        "HTTP-Referer":  "https://trading-ai-mentor.onrender.com",
+                        "X-Title":       "Trade Mentor Bot",
+                        "Content-Type":  "application/json",
                     },
                     json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": payload_content}],
-                        "max_tokens": 2048,
+                        "model":       model,
+                        "messages":    messages,
+                        "max_tokens":  2048,
                         "temperature": 0.4,
                     },
                 )
-                resp.raise_for_status()
-                data = resp.json()
 
-                # Extract text from response
-                text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if text and len(text) > 20:
-                    logger.info(f"✅ Vision success via {model}")
-                    return text
+            data   = resp.json()
+            status = resp.status_code
 
-        except httpx.HTTPStatusError as e:
-            logger.warning(f"✗ Vision {model}: HTTP {e.response.status_code} — {e.response.text[:200]}")
+            if status == 429:
+                logger.warning(f"✗ OpenRouter [{model}] rate limited — trying next…")
+                continue
+            if status >= 400:
+                logger.warning(f"✗ OpenRouter [{model}] HTTP {status} — trying next…")
+                continue
+
+            text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            if text and len(text.strip()) > 10:
+                logger.info(f"✅ OpenRouter text success via [{model}]")
+                return text.strip()
+
         except Exception as e:
-            logger.warning(f"✗ Vision {model}: {e}")
+            logger.warning(f"✗ OpenRouter [{model}]: {e}")
 
-    logger.error("All vision models failed.")
     return None
 
 
 # ─────────────────────────────────────────────────────────────────────────
-#  TEXT providers
+#  AI Manager — all text + vision tasks
 # ─────────────────────────────────────────────────────────────────────────
 
 class AIManagerService:
     def __init__(self):
         self.clients: dict = {}
 
-        # Priority: fastest + most generous first
         _providers = [
-            ("cerebras",   "https://api.cerebras.ai/v1",       CEREBRAS_API_KEY),
             ("groq",       "https://api.groq.com/openai/v1",   GROQ_API_KEY),
             ("sambanova",  "https://api.sambanova.ai/v1",      SAMBANOVA_API_KEY),
             ("hyperbolic", "https://api.hyperbolic.xyz/v1",    HYPERBOLIC_API_KEY),
-            ("openrouter", "https://openrouter.ai/api/v1",     OPENROUTER_API_KEY),
+            ("cerebras",   "https://api.cerebras.ai/v1",       CEREBRAS_API_KEY),
             ("together",   "https://api.together.xyz/v1",      TOGETHER_API_KEY),
             ("mistral",    "https://api.mistral.ai/v1",        MISTRAL_API_KEY),
             ("novita",     "https://api.novita.ai/v3/openai",  NOVITA_API_KEY),
@@ -98,23 +166,15 @@ class AIManagerService:
         for name, base_url, key in _providers:
             if key:
                 self.clients[name] = AsyncOpenAI(base_url=base_url, api_key=key)
-                logger.info(f"✅ Text provider registered: {name}")
+                logger.info(f"✅ Registered text provider: {name}")
 
-        self.text_priority = [
-            "groq",        # Llama 3.3 70B — very fast, generous
-            "sambanova",   # Llama 3.3 70B — fastest inference
-            "hyperbolic",  # Llama 3.3 70B — free credits
-            "openrouter",  # DeepSeek V3 — biggest context, most generous
-            "cerebras",    # fallback
-            "together",    # fallback
-            "mistral",     # fallback
-            "novita",      # fallback
-        ]
+        # Priority: fastest + most generous first
+        self.text_priority = ["groq", "sambanova", "hyperbolic", "cerebras",
+                               "together", "mistral", "novita"]
         self.text_models = {
             "groq":       "llama-3.3-70b-versatile",
             "sambanova":  "Meta-Llama-3.3-70B-Instruct",
             "hyperbolic": "meta-llama/Llama-3.3-70B-Instruct",
-            "openrouter": "deepseek/deepseek-chat-v3-0324:free",  # 64k context, very generous FREE
             "cerebras":   "llama-3.3-70b",
             "together":   "meta-llama/Llama-3-70b-chat-hf",
             "mistral":    "mistral-small-latest",
@@ -122,15 +182,16 @@ class AIManagerService:
         }
 
     async def _text(self, messages: list[dict]) -> str | None:
-        if not self.clients:
-            logger.error("No text API keys configured!")
-            return None
-
+        """
+        Tries all registered text providers in priority order.
+        On exhausted quota (429) or error → auto-switches to next provider.
+        Final fallback: OpenRouter DeepSeek V3 / Llama 4 Maverick.
+        """
         for provider in self.text_priority:
             if provider not in self.clients:
                 continue
             try:
-                logger.info(f"→ Text: trying {provider}…")
+                logger.info(f"→ Text: trying [{provider}]…")
                 resp = await self.clients[provider].chat.completions.create(
                     model=self.text_models[provider],
                     messages=messages,
@@ -138,50 +199,45 @@ class AIManagerService:
                     temperature=0.4,
                 )
                 text = resp.choices[0].message.content
-                if text:
-                    logger.info(f"✅ Text success via {provider}")
-                    return text
+                if text and len(text.strip()) > 10:
+                    logger.info(f"✅ Text success via [{provider}]")
+                    return text.strip()
             except Exception as e:
-                logger.warning(f"✗ {provider}: {e}")
+                logger.warning(f"✗ [{provider}]: {e} — switching to next provider…")
 
-        logger.error("All text providers failed.")
-        return None
+        # Last resort — OpenRouter text models
+        logger.info("All local providers failed, trying OpenRouter text…")
+        return await _call_openrouter_text(messages)
 
-    # ──────────────────────────────────────────────────────────
-    #  1. READ SCANNED PDF PAGE  (OpenRouter Vision → OCR + explain)
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+    #  1. Read a scanned PDF page via Vision AI
+    # ─────────────────────────────────────────────────────────────
     async def read_scanned_page(self, page_image_bytes: bytes, page_num: int) -> str | None:
         if not OPENROUTER_API_KEY:
-            return (
-                "⚠️ Для чтения сканированных PDF нужен <b>OPENROUTER_API_KEY</b>.\n"
-                "Получите его бесплатно на <a href='https://openrouter.ai'>openrouter.ai</a>."
-            )
+            return "⚠️ Для чтения сканированных PDF нужен <b>OPENROUTER_API_KEY</b>."
 
         prompt = (
             f"Это страница {page_num} из учебника по трейдингу (SMC/ICT). "
-            "На скриншоте — отсканированная страница книги.\n\n"
+            "На изображении — отсканированная страница книги.\n\n"
             "Выполни два действия:\n"
-            "1. Прочти текст на изображении.\n"
+            "1. Прочти весь текст на изображении.\n"
             "2. Объясни этот материал ученику ясно и интересно, как харизматичный ментор по трейдингу. "
             "Используй эмодзи (📊 💡 🎯), жирный текст для терминов, списки для структуры.\n\n"
-            "Если на странице нет важной теории (оглавление, пустая страница и т.д.), "
+            "Если на странице нет важной теории (оглавление, пустая страница), "
             "скажи: «На этой странице нет важной теории — двигаемся дальше! ➡️»"
         )
 
         result = await _call_vision(page_image_bytes, prompt)
         if not result:
-            return "❌ Не удалось прочитать страницу. Попробуйте ещё раз."
+            return "❌ Не удалось прочитать страницу. Все Vision AI заняты — попробуйте ещё раз."
         return result
 
-    # ──────────────────────────────────────────────────────────
-    #  2. ANALYSE TRADING CHART  (OpenRouter Vision → feedback)
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+    #  2. Analyse a trading chart (homework check)
+    # ─────────────────────────────────────────────────────────────
     async def analyze_homework(self, image_bytes: bytes, prompt_text: str = "") -> str | None:
         if not OPENROUTER_API_KEY:
-            return (
-                "⚠️ Для проверки графиков нужен <b>OPENROUTER_API_KEY</b>.\n"
-                "Получите его бесплатно на <a href='https://openrouter.ai'>openrouter.ai</a>."
-            )
+            return "⚠️ Для проверки графиков нужен <b>OPENROUTER_API_KEY</b>."
 
         prompt = (
             "Ты профессиональный ментор по трейдингу в стиле SMC/ICT. "
@@ -194,16 +250,16 @@ class AIManagerService:
             "Формат: структурированный, эмодзи (📊 💡 🎯 📉), тон наставника."
         )
         if prompt_text:
-            prompt += f"\n\nВопрос ученика: {prompt_text}"
+            prompt += f"\n\nВопрос ученика к графику: {prompt_text}"
 
         result = await _call_vision(image_bytes, prompt)
         if not result:
-            return "❌ Не удалось проанализировать график. Убедитесь что OPENROUTER_API_KEY добавлен на Render."
+            return "❌ Vision AI сейчас недоступны. Попробуйте ещё раз или опишите сделку текстом."
         return result
 
-    # ──────────────────────────────────────────────────────────
-    #  3. EXPLAIN PDF PAGE (text)
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+    #  3. Explain a PDF page (text-only)
+    # ─────────────────────────────────────────────────────────────
     async def analyze_theory(self, page_text: str) -> str | None:
         return await self._text([
             {
@@ -211,17 +267,17 @@ class AIManagerService:
                 "content": (
                     "Ты харизматичный ментор по смарт-мани трейдингу (SMC/ICT). "
                     "Объясни материал ученику максимально доступно и интересно. "
-                    "Используй эмодзи (📊 💡 🎯 📉), жирный текст для терминов и списки. "
-                    "Общайся как живой наставник. "
+                    "Используй эмодзи (📊 💡 🎯 📉), жирный текст для терминов, списки для структуры. "
+                    "Общайся как живой наставник, не как робот. "
                     "Если на странице нет важной теории, скажи: «На этой странице нет важной торговой теории — двигаемся дальше! ➡️»"
                 ),
             },
             {"role": "user", "content": f"Текст страницы:\n\n{page_text}"},
         ])
 
-    # ──────────────────────────────────────────────────────────
-    #  4. EXPLAIN SIMPLER
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+    #  4. Explain in simpler terms
+    # ─────────────────────────────────────────────────────────────
     async def explain_simpler(self, page_text: str) -> str | None:
         return await self._text([
             {
@@ -229,15 +285,15 @@ class AIManagerService:
                 "content": (
                     "Ты терпеливый ментор по трейдингу. Ученик не понял материал. "
                     "Объясни тот же материал максимально ПРОСТЫМ языком, как для абсолютного новичка. "
-                    "Используй жизненные аналогии, эмодзи и структуру."
+                    "Используй жизненные аналогии, эмодзи и пункты."
                 ),
             },
             {"role": "user", "content": f"Объясни попроще:\n\n{page_text}"},
         ])
 
-    # ──────────────────────────────────────────────────────────
-    #  5. ANSWER USER QUESTION
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+    #  5. Answer a user's trading question
+    # ─────────────────────────────────────────────────────────────
     async def answer_question(self, question: str) -> str | None:
         return await self._text([
             {
