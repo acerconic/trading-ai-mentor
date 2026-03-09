@@ -20,22 +20,24 @@ HTTPX_TIMEOUT = 90  # seconds
 
 # ─────────────────────────────────────────────────────────────────────────
 #  VISION MODELS — free, NO Google, ordered by quality
-# Confirmed FREE vision models on OpenRouter (no Google, tested as of 2025):
+# Verified working FREE vision models on OpenRouter (checked March 2025, NO Google):
 VISION_MODELS = [
-    "qwen/qwen2.5-vl-72b-instruct:free",      # Qwen VL 72B — best free vision
-    "qwen/qwen2-vl-7b-instruct:free",          # Qwen VL 7B — fast fallback
-    "mistralai/pixtral-12b:free",              # Pixtral 12B — Mistral vision
-    "microsoft/phi-4-multimodal-instruct:free", # Phi-4 Multimodal — Microsoft
+    "meta-llama/llama-3.2-11b-vision-instruct:free",  # Llama 3.2 11B Vision — confirmed working
+    "nvidia/nemotron-nano-12b-2-vl:free",              # NVIDIA Nemotron VL — confirmed free
+    "qwen/qwen3-vl-235b-a22b-thinking",               # Qwen3 VL 235B — $0/$0, very powerful
+    "meta-llama/llama-3.2-90b-vision-instruct:free",  # Llama 3.2 90B Vision — high quality
 ]
 
 # ─────────────────────────────────────────────────────────────────────────
 #  TEXT MODELS — most generous free tiers, ordered by speed + quality
 # ─────────────────────────────────────────────────────────────────────────
 TEXT_MODELS_ON_OPENROUTER = [
-    "deepseek/deepseek-chat-v3-0324:free",       # DeepSeek V3 — 64k ctx, very generous
-    "meta-llama/llama-4-maverick:free",           # Llama 4 Maverick — huge ctx, top quality
-    "meta-llama/llama-3.3-70b-instruct:free",    # Llama 3.3 70B — solid fallback
+    "deepseek/deepseek-chat-v3-0324:free",           # DeepSeek V3 — 64k ctx, very generous
+    "meta-llama/llama-3.3-70b-instruct:free",        # Llama 3.3 70B — solid free fallback
+    "mistralai/mistral-small-3.1-24b-instruct:free", # Mistral Small 3.1 — free
+    "qwen/qwen3-235b-a22b:free",                     # Qwen3 235B — $0/$0, very capable
 ]
+
 
 
 async def _call_vision(image_bytes: bytes, prompt: str) -> str | None:
