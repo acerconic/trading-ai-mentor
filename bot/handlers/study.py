@@ -167,11 +167,11 @@ async def handle_pdf_upload(message: Message, bot: Bot, state: FSMContext):
         total_pages  = await asyncio.to_thread(get_page_count, pdf_bytes)
         is_scanned   = len(pages_text) == 0
 
-        if is_scanned and not __import__("config").GEMINI_API_KEY:
+        if is_scanned and not __import__("config").OPENROUTER_API_KEY:
             await status_msg.edit_text(
                 "❌ Этот PDF содержит только сканированные изображения.\n\n"
-                "Для чтения сканов нужен <b>GEMINI_API_KEY</b>.\n"
-                "Получите его бесплатно на <a href='https://aistudio.google.com/'>aistudio.google.com</a> "
+                "Для чтения сканов нужен <b>OPENROUTER_API_KEY</b>.\n"
+                "Получите его бесплатно на <a href='https://openrouter.ai'>openrouter.ai</a> "
                 "и добавьте в Render → Environment.",
                 parse_mode="HTML"
             )
