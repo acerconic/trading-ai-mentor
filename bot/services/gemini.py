@@ -3,7 +3,11 @@ import asyncio
 import logging
 import httpx
 from openai import AsyncOpenAI
-from config import GROQ_API_KEY, CEREBRAS_API_KEY, TOGETHER_API_KEY, GEMINI_API_KEY
+from config import (
+    GROQ_API_KEY, CEREBRAS_API_KEY, TOGETHER_API_KEY, GEMINI_API_KEY,
+    OPENROUTER_API_KEY, SAMBANOVA_API_KEY, MISTRAL_API_KEY,
+    HYPERBOLIC_API_KEY, NOVITA_API_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +75,42 @@ class AIManagerService:
                 base_url="https://api.together.xyz/v1",
                 api_key=TOGETHER_API_KEY,
             )
+        if SAMBANOVA_API_KEY:
+            self.clients["sambanova"] = AsyncOpenAI(
+                base_url="https://api.sambanova.ai/v1",
+                api_key=SAMBANOVA_API_KEY,
+            )
+        if OPENROUTER_API_KEY:
+            self.clients["openrouter"] = AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=OPENROUTER_API_KEY,
+            )
+        if MISTRAL_API_KEY:
+            self.clients["mistral"] = AsyncOpenAI(
+                base_url="https://api.mistral.ai/v1",
+                api_key=MISTRAL_API_KEY,
+            )
+        if HYPERBOLIC_API_KEY:
+            self.clients["hyperbolic"] = AsyncOpenAI(
+                base_url="https://api.hyperbolic.xyz/v1",
+                api_key=HYPERBOLIC_API_KEY,
+            )
+        if NOVITA_API_KEY:
+            self.clients["novita"] = AsyncOpenAI(
+                base_url="https://api.novita.ai/v3/openai",
+                api_key=NOVITA_API_KEY,
+            )
 
-        self.text_priority = ["cerebras", "groq", "together"]
+        self.text_priority = ["cerebras", "groq", "sambanova", "openrouter", "together", "mistral", "hyperbolic", "novita"]
         self.text_models = {
-            "cerebras": "llama-3.3-70b",
-            "groq":     "llama-3.3-70b-versatile",
-            "together": "meta-llama/Llama-3-70b-chat-hf",
+            "cerebras":   "llama-3.3-70b",
+            "groq":       "llama-3.3-70b-versatile",
+            "sambanova":  "Meta-Llama-3.3-70B-Instruct",
+            "openrouter": "meta-llama/llama-3.3-70b-instruct:free",
+            "together":   "meta-llama/Llama-3-70b-chat-hf",
+            "mistral":    "mistral-small-latest",
+            "hyperbolic": "meta-llama/Llama-3.3-70B-Instruct",
+            "novita":     "meta-llama/llama-3.3-70b-instruct",
         }
 
     async def _text(self, messages: list[dict]) -> str | None:
