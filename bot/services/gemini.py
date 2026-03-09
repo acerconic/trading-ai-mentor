@@ -342,16 +342,48 @@ class AIManagerService:
 
     # ── answer_question ──────────────────────────────────────────────────────
     async def answer_question(self, question: str, lang: str = "RU") -> str | None:
-        sys = (
-            "Ты эксперт по SMC/ICT трейдингу. Дай чёткий HTML-ответ. "
-            "Эмодзи, <b>жирный</b> для терминов. НЕ используй ** и ###."
-            if lang != "UZ" else
-            "Siz SMC/ICT savdo mutaxassisiz. Aniq HTML javob bering. "
-            "Emoji, <b>qalin</b> atamalar uchun. ** va ### ISHLATMANG."
-        )
-        return await self._text([{"role": "system", "content": sys},
-                                  {"role": "user", "content": question}])
+        """
+        Strictly limited to trading topics only.
+        Non-trading questions get a polite refusal in the user's language.
+        """
+        if lang == "UZ":
+            sys = (
+                "Siz SMC/ICT va smart money treydingidan mutaxassis mentorsiz. "
+                "FAQAT savdo, forex, kripto, texnik tahlil, bozor strukturasi (SMC/ICT), "
+                "va investitsiya mavzularida javob berasiz.\n\n"
+                "MUHIM QOIDALAR:\n"
+                "1. Agar savol savdo, forex, kripto, texnik tahlil, SMC, ICT, "
+                "orderblock, FVG, likvidlik, bozor strukturasi, trading psixologiyasi, "
+                "risk menejment va shunga o'xshash mavzularga bog'liq bo'lmasa — "
+                "javob bermang. O'rniga: «❌ Men faqat savdo va treydingga oid savollarga javob beraman. "
+                "Orderblok, FVG, likvidlik, SMC/ICT kabi mavzular haqida so'rang!»\n"
+                "2. 'Liquid' so'zi doim LIKVIDLIK (bozor termin) deb tushuniladi, suyuqlik emas!\n"
+                "3. Hech qachon kimyo, biologiya, tarix, sport va boshqa sohalarga javob bermang.\n"
+                "4. Telegram HTML ishlatamiz: <b>qalin</b> atamalar, emoji 📊💡🎯📉. "
+                "** va ### ISHLATMANG."
+            )
+        else:
+            sys = (
+                "Ты строгий ментор по SMC/ICT трейдингу. "
+                "Ты отвечаешь ТОЛЬКО на вопросы о трейдинге, форекс, крипте, "
+                "техническом анализе, структуре рынка (SMC/ICT) и инвестициях.\n\n"
+                "ЖЁСТКИЕ ПРАВИЛА:\n"
+                "1. Если вопрос НЕ связан с трейдингом, форекс, криптой, техническим анализом, "
+                "SMC, ICT, ордерблоками, FVG, ликвидностью, структурой рынка, "
+                "психологией трейдинга, риск-менеджментом — НЕ ОТВЕЧАЙ. "
+                "Вместо этого напиши: «❌ Я отвечаю только на вопросы по трейдингу. "
+                "Спроси про Orderblock, FVG, ликвидность, BOS, CHoCH, ICT или SMC!»\n"
+                "2. Слово 'Liquid/Ликвидность' — это ВСЕГДА биржевой термин, не химия!\n"
+                "3. Никогда не отвечай на вопросы по химии, биологии, истории, спорту и т.д.\n"
+                "4. Используй Telegram HTML: <b>жирный</b> для терминов, эмодзи 📊💡🎯📉. "
+                "НЕ используй ** и ###."
+            )
+        return await self._text([
+            {"role": "system", "content": sys},
+            {"role": "user",   "content": question},
+        ])
 
 
 # Singleton
 gemini_service = AIManagerService()
+
