@@ -29,7 +29,7 @@ class ThrottlingMiddleware(BaseMiddleware):
         user_id = event.from_user.id
         
         # Skip throttling for admin
-        if user_id == ADMIN_ID:
+        if str(user_id) == str(ADMIN_ID):
             return await handler(event, data)
             
         now = time.time()
