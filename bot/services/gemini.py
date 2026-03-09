@@ -20,12 +20,12 @@ HTTPX_TIMEOUT = 90  # seconds
 
 # ─────────────────────────────────────────────────────────────────────────
 #  VISION MODELS — free, NO Google, ordered by quality
-# ─────────────────────────────────────────────────────────────────────────
+# Confirmed FREE vision models on OpenRouter (no Google, tested as of 2025):
 VISION_MODELS = [
-    "qwen/qwen2.5-vl-72b-instruct:free",  # Qwen VL 72B — best free vision
-    "meta-llama/llama-4-maverick:free",    # Llama 4 Maverick — multimodal, FREE
-    "meta-llama/llama-4-scout:free",       # Llama 4 Scout — fast vision, FREE
-    "mistralai/pixtral-12b:free",          # Pixtral 12B — Mistral vision, FREE
+    "qwen/qwen2.5-vl-72b-instruct:free",      # Qwen VL 72B — best free vision
+    "qwen/qwen2-vl-7b-instruct:free",          # Qwen VL 7B — fast fallback
+    "mistralai/pixtral-12b:free",              # Pixtral 12B — Mistral vision
+    "microsoft/phi-4-multimodal-instruct:free", # Phi-4 Multimodal — Microsoft
 ]
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ async def _call_vision(image_bytes: bytes, prompt: str) -> str | None:
                 logger.info(f"✅ Vision success via [{model}]")
                 return text.strip()
             else:
-                logger.warning(f"✗ [{model}] returned empty/short response — trying next…")
+                logger.warning(f"✗ [{model}] empty/short response: '{text[:80]}' — trying next…")
 
         except httpx.TimeoutException:
             logger.warning(f"✗ [{model}] timed out — trying next…")

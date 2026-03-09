@@ -54,15 +54,36 @@ def get_page_count(pdf_bytes: bytes) -> int:
     return n
 
 
-def get_page_image(pdf_bytes: bytes, page_idx: int) -> bytes | None:
-    """Render a PDF page to JPEG at 1.5× zoom."""
+def get_page_image(pdf_bytes: bytes, page_idx: int, max_side: int = 1024) -> bytes | None:
+    """
+    Render a PDF page to a compressed JPEG suitable for Vision AI APIs.
+    - Renders at 1.0x zoom for speed
+    - Resizes so the longest side is max_side px (default 1024)
+    - Saves as JPEG quality=82  → typically 150-300 KB (vs 3-8 MB raw)
+    This keeps the base64 payload small enough for free-tier Vision APIs.
+    """
+    from PIL import Image
+
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
-        mat = fitz.Matrix(1.5, 1.5)
-        pix = doc[page_idx].get_pixmap(matrix=mat)
-        return pix.tobytes("jpeg")
+        pix = doc[page_idx].get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        # Resize so longest side <= max_side
+        w, h = img.size
+        if max(w, h) > max_side:
+            scale   = max_side / max(w, h)
+            new_w   = int(w * scale)
+            new_h   = int(h * scale)
+            img     = img.resize((new_w, new_h), Image.LANCZOS)
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=82, optimize=True)
+        result = buf.getvalue()
+        logger.info(f"Page {page_idx} image size: {len(result) // 1024} KB")
+        return result
     except Exception as e:
-        logger.error(f"Error rendering page {page_idx}: {e}")
+        logger.error(f"Error rendering page {page_idx}: {e}", exc_info=True)
         return None
     finally:
         doc.close()
