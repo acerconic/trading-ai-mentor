@@ -12,7 +12,7 @@ from config import ADMIN_ID
 logger = logging.getLogger(__name__)
 
 class ThrottlingMiddleware(BaseMiddleware):
-    def __init__(self, limit: float = 30.0):
+    def __init__(self, limit: float = 3.0):  # 3 sec is enough to prevent spam
         self.limit = limit
         self.user_timers: dict[int, float] = {}
 

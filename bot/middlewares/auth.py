@@ -38,16 +38,26 @@ class AuthMiddleware(BaseMiddleware):
             return await handler(event, data)
             
         # Allow admin callbacks to pass through
-        if isinstance(event, CallbackQuery) and text and (text.startswith('approve_') or text.startswith('reject_')):
+        if isinstance(event, CallbackQuery) and text and (
+            text.startswith('approve_') or text.startswith('reject_')
+            or text in ('lang_ru', 'lang_uz')  # allow language selection always
+        ):
             return await handler(event, data)
             
         user = await Database.get_user(user_id)
         
         if not user or not user.get("is_approved"):
+            lang = (user.get("language") or "RU").upper() if user else "RU"
             if isinstance(event, Message):
-                await event.answer("⛔️ Доступ закрыт. Ваша заявка еще не одобрена или вы не зарегистрированы.")
+                msg = (
+                    "⛔️ Kirish yopiq. Arizangiz hali ko'rib chiqilmagan."
+                    if lang == "UZ" else
+                    "⛔️ Доступ закрыт. Ваша заявка ещё не одобрена."
+                )
+                await event.answer(msg)
             elif isinstance(event, CallbackQuery):
-                await event.answer("⛔️ Доступ закрыт.", show_alert=True)
-            return # Block execution
+                msg = "⛔️ Kirish yopiq." if lang == "UZ" else "⛔️ Доступ закрыт."
+                await event.answer(msg, show_alert=True)
+            return
             
         return await handler(event, data)

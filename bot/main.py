@@ -79,13 +79,16 @@ async def main():
         # Start dummy web server for Render port binding
         await start_dummy_server()
 
-        # Force-close any existing webhook or long-poll session on Telegram side.
-        # A 3-second sleep lets a previous ghost process die before we take over.
+        # Force-close any existing webhook or long-poll session.
+        # 5 sec sleep lets the previous ghost process die fully before we take over.
         logger.info("Resetting Telegram session (killing any ghost instances)…")
         await bot.delete_webhook(drop_pending_updates=True)
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
 
-        await dp.start_polling(bot)
+        await dp.start_polling(
+            bot,
+            allowed_updates=["message", "callback_query"],
+        )
     except Exception as e:
         logger.error(f"Failed to start polling: {e}", exc_info=True)
     finally:
