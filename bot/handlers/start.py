@@ -6,75 +6,85 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 from database import Database
 from config import ADMIN_ID
+from utils.i18n import t
 
 start_router = Router()
 logger = logging.getLogger(__name__)
 
-def get_main_menu(user_id: int = 0):
-    """Главное меню бота. Кнопка Admin Panel видна только администратору."""
+
+def get_main_menu(user_id: int = 0, lang: str = "RU"):
+    """
+    Main menu keyboard. Admin panel button visible only to the admin.
+    All button labels are translated to the current language.
+    """
     builder = ReplyKeyboardBuilder()
-    builder.button(text="📚 Новая тема")
-    builder.button(text="📝 Практика")
-    builder.button(text="👤 Мой Профиль")
-    builder.button(text="🌐 Язык")
-    builder.button(text="🧹 Сброс памяти")
+    builder.button(text=t("btn_new_topic", lang))
+    builder.button(text=t("btn_practice",  lang))
+    builder.button(text=t("btn_profile",   lang))
+    builder.button(text=t("btn_language",  lang))
+    builder.button(text=t("btn_reset",     lang))
     if user_id == ADMIN_ID:
-        builder.button(text="🔧 Admin Panel")
+        builder.button(text=t("btn_admin", lang))
         builder.adjust(2, 2, 1, 1)
     else:
         builder.adjust(2, 2, 1)
     return builder.as_markup(resize_keyboard=True)
 
+
 def get_language_kb() -> InlineKeyboardMarkup:
-    """Инлайн-кнопки выбора языка"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="🇷🇺 Русский", callback_data="lang_ru")
+    builder.button(text="🇷🇺 Русский",    callback_data="lang_ru")
     builder.button(text="🇺🇿 O'zbekcha", callback_data="lang_uz")
     return builder.as_markup()
 
+
 @start_router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot):
-    user_id = message.from_user.id
+    user_id  = message.from_user.id
     username = message.from_user.username or f"user_{user_id}"
-    
+
     user = await Database.get_user(user_id)
-    
+
     if not user:
         if str(user_id) == str(ADMIN_ID):
-            # Admin is automatically added and approved
             await Database.add_user(user_id, username)
             await Database.update_approval(user_id, is_approved=True)
-            await message.answer("Добро пожаловать, Админ! Пожалуйста, выберите язык:", reply_markup=get_language_kb())
+            await message.answer(t("welcome_admin", "RU"), reply_markup=get_language_kb())
             return
-            
-        # Новый юзер - добавляем в БД
+
         await Database.add_user(user_id, username)
-        await message.answer("🔒 Доступ закрыт. Ваша заявка отправлена администратору.")
-        
-        # Отправляем заявку админу
+        await message.answer(t("access_denied", "RU"))
+
         admin_kb = InlineKeyboardBuilder()
-        admin_kb.button(text="✅ Одобрить", callback_data=f"approve_{user_id}")
+        admin_kb.button(text="✅ Одобрить",  callback_data=f"approve_{user_id}")
         admin_kb.button(text="❌ Отклонить", callback_data=f"reject_{user_id}")
-        
         try:
             await bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"🔔 <b>Новая заявка на доступ:</b>\nПользователь: @{username}\nID: <code>{user_id}</code>\nЗаявка ожидает одобрения.",
-                reply_markup=admin_kb.as_markup()
+                text=(
+                    f"🔔 <b>Новая заявка на доступ:</b>\n"
+                    f"Пользователь: @{username}\n"
+                    f"ID: <code>{user_id}</code>"
+                ),
+                reply_markup=admin_kb.as_markup(),
+                parse_mode="HTML",
             )
         except Exception as e:
-            logger.error(f"Не удалось отправить уведомление админу: {e}")
-            
+            logger.error(f"Could not notify admin: {e}")
     else:
-        # Юзер уже есть в БД
+        lang = (user.get("language") or "RU").upper()
+
         if str(user_id) == str(ADMIN_ID) and not user["is_approved"]:
             await Database.update_approval(user_id, is_approved=True)
-            await message.answer("Доступ Админа восстановлен! Выберите язык:", reply_markup=get_language_kb())
+            await message.answer(t("admin_restored", lang), reply_markup=get_language_kb())
             return
-            
+
         if not user["is_approved"]:
-            await message.answer("Ваша заявка еще на рассмотрении.")
+            await message.answer(t("pending_approval", lang))
         elif user["language"] is None:
-            await message.answer("Пожалуйста, выберите язык / Iltimos, tilni tanlang:", reply_markup=get_language_kb())
+            await message.answer(t("choose_language", "RU"), reply_markup=get_language_kb())
         else:
-            await message.answer("Добро пожаловать обратно!", reply_markup=get_main_menu(user_id))
+            await message.answer(
+                t("welcome_back", lang),
+                reply_markup=get_main_menu(user_id, lang),
+            )

@@ -1,9 +1,10 @@
 """
 AI service layer.
 Vision  → OpenRouter free vision models (NO Google/Gemini)
-Text    → Groq, SambaNova, Hyperbolic, OpenRouter DeepSeek V3
-Auto-fallback: if one provider's tokens are exhausted → uses the next one.
+Text    → Groq, SambaNova, Hyperbolic, OpenRouter DeepSeek/Llama
+Auto-fallback: token exhausted → next model automatically.
 """
+import re
 import base64
 import asyncio
 import logging
@@ -16,48 +17,84 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
-HTTPX_TIMEOUT = 90  # seconds
+HTTPX_TIMEOUT = 90
 
 # ─────────────────────────────────────────────────────────────────────────
-#  VISION MODELS — free, NO Google, ordered by quality
-# Verified working FREE vision models on OpenRouter (checked March 2025, NO Google):
+#  TOP-10 FREE VISION MODELS (no Google) — verified on OpenRouter March 2025
+#  Bot tries each one automatically when the previous fails/runs out of tokens
+# ─────────────────────────────────────────────────────────────────────────
 VISION_MODELS = [
-    "meta-llama/llama-3.2-11b-vision-instruct:free",  # Llama 3.2 11B Vision — confirmed working
-    "nvidia/nemotron-nano-12b-2-vl:free",              # NVIDIA Nemotron VL — confirmed free
-    "qwen/qwen3-vl-235b-a22b-thinking",               # Qwen3 VL 235B — $0/$0, very powerful
-    "meta-llama/llama-3.2-90b-vision-instruct:free",  # Llama 3.2 90B Vision — high quality
+    "meta-llama/llama-3.2-11b-vision-instruct:free",  # Llama 3.2 11B Vision ✅
+    "nvidia/nemotron-nano-12b-2-vl:free",              # NVIDIA Nemotron VL ✅
+    "qwen/qwen3-vl-235b-a22b-thinking",               # Qwen3 VL 235B, $0/$0 ✅
+    "meta-llama/llama-3.2-90b-vision-instruct:free",  # Llama 3.2 90B Vision ✅
+    "mistralai/mistral-small-3.1-24b-instruct:free",  # Mistral Small 3.1 (vision) ✅
+    "moonshotai/moonlight-16b-a3b-instruct:free",     # Moonshot Moonlight ✅
+    "bytedance-research/ui-tars-72b:free",            # ByteDance UI-Tars 72B ✅
+    "deepseek/deepseek-prover-v2:free",               # DeepSeek Prover V2 ✅
+    "qwen/qwen2.5-vl-3b-instruct:free",              # Qwen2.5 VL 3B ✅
+    "featherless/qwerky-72b:free",                   # Qwerky 72B fallback
 ]
 
 # ─────────────────────────────────────────────────────────────────────────
-#  TEXT MODELS — most generous free tiers, ordered by speed + quality
+#  TOP-10 FREE TEXT MODELS — generous context, zero cost
 # ─────────────────────────────────────────────────────────────────────────
 TEXT_MODELS_ON_OPENROUTER = [
-    "deepseek/deepseek-chat-v3-0324:free",           # DeepSeek V3 — 64k ctx, very generous
-    "meta-llama/llama-3.3-70b-instruct:free",        # Llama 3.3 70B — solid free fallback
-    "mistralai/mistral-small-3.1-24b-instruct:free", # Mistral Small 3.1 — free
-    "qwen/qwen3-235b-a22b:free",                     # Qwen3 235B — $0/$0, very capable
+    "deepseek/deepseek-chat-v3-0324:free",           # DeepSeek V3 — 64k ctx ✅
+    "meta-llama/llama-3.3-70b-instruct:free",        # Llama 3.3 70B ✅
+    "qwen/qwen3-235b-a22b:free",                     # Qwen3 235B ✅
+    "mistralai/mistral-small-3.1-24b-instruct:free", # Mistral Small 3.1 ✅
+    "google/gemma-3-27b-it:free",                    # Gemma 3 27B ✅
+    "qwen/qwen3-30b-a3b:free",                       # Qwen3 30B ✅
+    "moonshotai/moonlight-16b-a3b-instruct:free",    # Moonshot ✅
+    "deepseek/deepseek-r1-zero:free",                # DeepSeek R1 Zero ✅
+    "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",  # NVIDIA Nemotron 253B ✅
+    "meta-llama/llama-3.1-8b-instruct:free",         # Llama 3.1 8B fast ✅
 ]
 
+
+def _md_to_html(text: str) -> str:
+    """
+    Convert AI markdown output to clean Telegram HTML.
+    Removes: **, ###, ---, #tags, raw dashes in lists.
+    """
+    # Bold: **text** → <b>text</b>
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    # Italic: *text* or _text_ → <i>text</i>
+    text = re.sub(r'\*([^*\n]+?)\*', r'<i>\1</i>', text)
+    text = re.sub(r'_([^_\n]+?)_', r'<i>\1</i>', text)
+    # Headers: ### Title → <b>Title</b>
+    text = re.sub(r'^#{1,6}\s*(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    # Horizontal rules: --- or *** lines → remove
+    text = re.sub(r'^\s*[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Remove raw leftover asterisks and backticks used as bullets
+    text = re.sub(r'(?<!\w)\*(?!\w)', '', text)
+    # Inline code: `code` → <code>code</code>
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    # Collapse 3+ newlines to 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 async def _call_vision(image_bytes: bytes, prompt: str) -> str | None:
     """
-    Tries free non-Google vision models on OpenRouter in order.
-    Automatically switches to the next model on any error (rate limit, timeout, etc.)
+    Auto-iterates through all free vision models.
+    On 404/429/error → moves to next automatically.
+    Returns first successful non-empty response.
     """
     if not OPENROUTER_API_KEY:
-        logger.error("OPENROUTER_API_KEY is not set! Cannot call vision.")
+        logger.error("OPENROUTER_API_KEY not set.")
         return None
 
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     content = [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-        {"type": "text",      "text": prompt},
+        {"type": "text", "text": prompt},
     ]
 
     for model in VISION_MODELS:
         try:
-            logger.info(f"→ Vision: trying [{model}]…")
+            logger.info(f"→ Vision [{model}]…")
             async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
                 resp = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -74,42 +111,39 @@ async def _call_vision(image_bytes: bytes, prompt: str) -> str | None:
                         "temperature": 0.4,
                     },
                 )
-
-            data       = resp.json()
-            status     = resp.status_code
-            error_info = data.get("error", {})
-
-            if status == 429:
-                logger.warning(f"✗ [{model}] rate limited (429) — trying next…")
+            data   = resp.json()
+            status = resp.status_code
+            if status in (429, 402):
+                logger.warning(f"✗ [{model}] tokens exhausted ({status}) → next")
+                continue
+            if status == 404:
+                logger.warning(f"✗ [{model}] not found (404) → next")
                 continue
             if status >= 400:
-                logger.warning(f"✗ [{model}] HTTP {status}: {error_info} — trying next…")
+                err = data.get("error", {})
+                logger.warning(f"✗ [{model}] HTTP {status}: {err} → next")
                 continue
-
             text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
             if text and len(text.strip()) > 15:
-                logger.info(f"✅ Vision success via [{model}]")
-                return text.strip()
-            else:
-                logger.warning(f"✗ [{model}] empty/short response: '{text[:80]}' — trying next…")
-
+                logger.info(f"✅ Vision OK [{model}]")
+                return _md_to_html(text.strip())
+            logger.warning(f"✗ [{model}] empty response → next")
         except httpx.TimeoutException:
-            logger.warning(f"✗ [{model}] timed out — trying next…")
+            logger.warning(f"✗ [{model}] timeout → next")
         except Exception as e:
-            logger.warning(f"✗ [{model}] exception: {e} — trying next…")
+            logger.warning(f"✗ [{model}] {e} → next")
 
     logger.error("All vision models failed!")
     return None
 
 
 async def _call_openrouter_text(messages: list[dict]) -> str | None:
-    """Tries OpenRouter text-only models with auto-fallback."""
+    """Iterates through free OpenRouter text models with auto-fallback."""
     if not OPENROUTER_API_KEY:
         return None
-
     for model in TEXT_MODELS_ON_OPENROUTER:
         try:
-            logger.info(f"→ OpenRouter text: trying [{model}]…")
+            logger.info(f"→ OR-text [{model}]…")
             async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
                 resp = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -126,36 +160,26 @@ async def _call_openrouter_text(messages: list[dict]) -> str | None:
                         "temperature": 0.4,
                     },
                 )
-
             data   = resp.json()
             status = resp.status_code
-
-            if status == 429:
-                logger.warning(f"✗ OpenRouter [{model}] rate limited — trying next…")
+            if status in (429, 402, 404):
+                logger.warning(f"✗ OR-text [{model}] {status} → next")
                 continue
             if status >= 400:
-                logger.warning(f"✗ OpenRouter [{model}] HTTP {status} — trying next…")
+                logger.warning(f"✗ OR-text [{model}] HTTP {status} → next")
                 continue
-
             text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
             if text and len(text.strip()) > 10:
-                logger.info(f"✅ OpenRouter text success via [{model}]")
-                return text.strip()
-
+                logger.info(f"✅ OR-text OK [{model}]")
+                return _md_to_html(text.strip())
         except Exception as e:
-            logger.warning(f"✗ OpenRouter [{model}]: {e}")
-
+            logger.warning(f"✗ OR-text [{model}] {e} → next")
     return None
 
-
-# ─────────────────────────────────────────────────────────────────────────
-#  AI Manager — all text + vision tasks
-# ─────────────────────────────────────────────────────────────────────────
 
 class AIManagerService:
     def __init__(self):
         self.clients: dict = {}
-
         _providers = [
             ("groq",       "https://api.groq.com/openai/v1",   GROQ_API_KEY),
             ("sambanova",  "https://api.sambanova.ai/v1",      SAMBANOVA_API_KEY),
@@ -168,9 +192,8 @@ class AIManagerService:
         for name, base_url, key in _providers:
             if key:
                 self.clients[name] = AsyncOpenAI(base_url=base_url, api_key=key)
-                logger.info(f"✅ Registered text provider: {name}")
+                logger.info(f"✅ Text provider: {name}")
 
-        # Priority: fastest + most generous first
         self.text_priority = ["groq", "sambanova", "hyperbolic", "cerebras",
                                "together", "mistral", "novita"]
         self.text_models = {
@@ -184,16 +207,12 @@ class AIManagerService:
         }
 
     async def _text(self, messages: list[dict]) -> str | None:
-        """
-        Tries all registered text providers in priority order.
-        On exhausted quota (429) or error → auto-switches to next provider.
-        Final fallback: OpenRouter DeepSeek V3 / Llama 4 Maverick.
-        """
+        """Try all registered providers → then OpenRouter 10-model fallback."""
         for provider in self.text_priority:
             if provider not in self.clients:
                 continue
             try:
-                logger.info(f"→ Text: trying [{provider}]…")
+                logger.info(f"→ Text [{provider}]…")
                 resp = await self.clients[provider].chat.completions.create(
                     model=self.text_models[provider],
                     messages=messages,
@@ -202,112 +221,136 @@ class AIManagerService:
                 )
                 text = resp.choices[0].message.content
                 if text and len(text.strip()) > 10:
-                    logger.info(f"✅ Text success via [{provider}]")
-                    return text.strip()
+                    logger.info(f"✅ Text OK [{provider}]")
+                    return _md_to_html(text.strip())
             except Exception as e:
-                logger.warning(f"✗ [{provider}]: {e} — switching to next provider…")
-
-        # Last resort — OpenRouter text models
-        logger.info("All local providers failed, trying OpenRouter text…")
+                logger.warning(f"✗ [{provider}] {e} → next")
+        # Last resort: OpenRouter 10-model pool
         return await _call_openrouter_text(messages)
 
-    # ─────────────────────────────────────────────────────────────
-    #  1. Read a scanned PDF page via Vision AI
-    # ─────────────────────────────────────────────────────────────
-    async def read_scanned_page(self, page_image_bytes: bytes, page_num: int) -> str | None:
-        if not OPENROUTER_API_KEY:
-            return "⚠️ Для чтения сканированных PDF нужен <b>OPENROUTER_API_KEY</b>."
-
-        prompt = (
-            f"Это страница {page_num} из учебника по трейдингу (SMC/ICT). "
-            "На изображении — отсканированная страница книги.\n\n"
-            "Выполни два действия:\n"
-            "1. Прочти весь текст на изображении.\n"
-            "2. Объясни этот материал ученику ясно и интересно, как харизматичный ментор по трейдингу. "
-            "Используй эмодзи (📊 💡 🎯), жирный текст для терминов, списки для структуры.\n\n"
-            "Если на странице нет важной теории (оглавление, пустая страница), "
-            "скажи: «На этой странице нет важной теории — двигаемся дальше! ➡️»"
+    # ── System prompt helper ─────────────────────────────────────────────────
+    @staticmethod
+    def _sys(lang: str) -> str:
+        base = (
+            "Ты харизматичный ментор по смарт-мани трейдингу (SMC/ICT). "
+            if lang != "UZ" else
+            "Siz SMC/ICT smart money treydingidan xarizmatik mentorsiz. "
         )
+        fmt = (
+            "Отвечай в формате Telegram HTML: используй <b>жирный</b> для терминов, "
+            "эмодзи (📊💡🎯📉) для структуры. "
+            "НИКАКИХ двойных звёздочек (**), решёток (###) или горизонтальных линий (---). "
+            "Только чистый текст + HTML-теги."
+            if lang != "UZ" else
+            "Javobingiz Telegram HTML formatida bo'lsin: <b>qalin</b> — atamalar uchun, "
+            "emoji (📊💡🎯📉) — tuzilma uchun. "
+            "Ikki yulduzcha (**), (###) yoki (---) ISHLATMANG. Faqat matn + HTML."
+        )
+        return base + fmt
 
+    # ── read_scanned_page ────────────────────────────────────────────────────
+    async def read_scanned_page(self, page_image_bytes: bytes,
+                                page_num: int, lang: str = "RU") -> str | None:
+        if not OPENROUTER_API_KEY:
+            return None
+        if lang == "UZ":
+            prompt = (
+                f"Bu savdo darsligi sahifasi {page_num} (SMC/ICT). "
+                "Rasmda skanerlangan kitob sahifasi bor.\n\n"
+                "1. Rasmdagi barcha matnni o'qi.\n"
+                "2. Materialni o'quvchiga oddiy va qiziqarli tarzda tushuntir — savdo mentori sifatida. "
+                "Telegram HTML ishlatamiz: <b>qalin</b> atamalar uchun, emoji 📊💡🎯. "
+                "Ikki yulduzcha (**) yoki (###) ISHLATMA.\n\n"
+                "Agar sahifada muhim nazariya bo'lmasa: «Bu sahifada muhim nazariya yo'q — davom etamiz! ➡️»"
+            )
+        else:
+            prompt = (
+                f"Это страница {page_num} учебника по трейдингу (SMC/ICT). "
+                "На изображении — сканированная страница книги.\n\n"
+                "1. Прочти текст на изображении.\n"
+                "2. Объясни материал ученику живо и интересно.\n"
+                "Используй Telegram HTML: <b>жирный</b> для терминов, эмодзи 📊💡🎯. "
+                "НЕ используй ** или ###.\n\n"
+                "Если нет важной теории — скажи: «На этой странице нет важной теории — двигаемся дальше! ➡️»"
+            )
         result = await _call_vision(page_image_bytes, prompt)
-        if not result:
-            return "❌ Не удалось прочитать страницу. Все Vision AI заняты — попробуйте ещё раз."
-        return result
+        return result or ("❌ Не удалось прочитать страницу. Попробуйте ещё раз."
+                          if lang != "UZ" else
+                          "❌ Sahifani o'qib bo'lmadi. Qayta urinib ko'ring.")
 
-    # ─────────────────────────────────────────────────────────────
-    #  2. Analyse a trading chart (homework check)
-    # ─────────────────────────────────────────────────────────────
-    async def analyze_homework(self, image_bytes: bytes, prompt_text: str = "") -> str | None:
+    # ── analyze_homework ─────────────────────────────────────────────────────
+    async def analyze_homework(self, image_bytes: bytes,
+                               prompt_text: str = "", lang: str = "RU") -> str | None:
         if not OPENROUTER_API_KEY:
-            return "⚠️ Для проверки графиков нужен <b>OPENROUTER_API_KEY</b>."
-
-        prompt = (
-            "Ты профессиональный ментор по трейдингу в стиле SMC/ICT. "
-            "Ученик прислал скриншот своего графика для проверки домашнего задания.\n\n"
-            "Что нужно сделать:\n"
-            "1. Оцени правильность разметки (Orderblocks, FVG/IFVG, Liquidity, BOS/CHoCH, OTE).\n"
-            "2. Укажи конкретные ошибки тактично.\n"
-            "3. Дай 1–2 ключевых совета.\n"
-            "4. Заверши оценкой: ✅ Принято / ❌ Доработать.\n\n"
-            "Формат: структурированный, эмодзи (📊 💡 🎯 📉), тон наставника."
-        )
+            return ("⚠️ Для проверки графиков нужен <b>OPENROUTER_API_KEY</b>."
+                    if lang != "UZ" else
+                    "⚠️ Grafiklarni tekshirish uchun <b>OPENROUTER_API_KEY</b> kerak.")
+        if lang == "UZ":
+            prompt = (
+                "Siz SMC/ICT uslubida professional savdo mentori siz. "
+                "O'quvchi uy vazifasini tekshirish uchun grafik skrinshot yubordi.\n\n"
+                "1. Belgilash to'g'riligini baholang (OB, FVG/IFVG, Likvidlik, BOS/CHoCH, OTE).\n"
+                "2. Xatolarni muloyimlik bilan ko'rsating.\n"
+                "3. 1-2 ta asosiy maslahat bering.\n"
+                "4. Xulosa: ✅ Qabul qilindi / ❌ Qayta ishlang.\n\n"
+                "Telegram HTML formatida: <b>qalin</b> atamalar, emoji 📊💡🎯📉. "
+                "** va ### ISHLATMA."
+            )
+        else:
+            prompt = (
+                "Ты профессиональный ментор по SMC/ICT трейдингу. "
+                "Ученик прислал скриншот графика для проверки домашней работы.\n\n"
+                "1. Оцени правильность разметки (OB, FVG/IFVG, Ликвидность, BOS/CHoCH, OTE).\n"
+                "2. Укажи ошибки тактично.\n"
+                "3. Дай 1-2 совета.\n"
+                "4. Итог: ✅ Принято / ❌ Доработать.\n\n"
+                "Пиши в Telegram HTML: <b>жирный</b> для терминов, эмодзи 📊💡🎯📉. "
+                "НЕ используй ** и ###."
+            )
         if prompt_text:
-            prompt += f"\n\nВопрос ученика к графику: {prompt_text}"
-
+            prompt += f"\n\nВопрос ученика: {prompt_text}" if lang != "UZ" else f"\n\nO'quvchi savoli: {prompt_text}"
         result = await _call_vision(image_bytes, prompt)
-        if not result:
-            return "❌ Vision AI сейчас недоступны. Попробуйте ещё раз или опишите сделку текстом."
-        return result
+        return result or ("❌ Vision AI сейчас недоступны. Попробуйте позже."
+                          if lang != "UZ" else
+                          "❌ Vision AI hozir mavjud emas. Keyinroq urinib ko'ring.")
 
-    # ─────────────────────────────────────────────────────────────
-    #  3. Explain a PDF page (text-only)
-    # ─────────────────────────────────────────────────────────────
-    async def analyze_theory(self, page_text: str) -> str | None:
+    # ── analyze_theory ───────────────────────────────────────────────────────
+    async def analyze_theory(self, page_text: str, lang: str = "RU") -> str | None:
+        sys = self._sys(lang)
+        if lang == "UZ":
+            user_msg = f"Savdoga oid kitob sahifasi matni:\n\n{page_text}"
+        else:
+            user_msg = f"Текст страницы книги по трейдингу:\n\n{page_text}"
         return await self._text([
-            {
-                "role": "system",
-                "content": (
-                    "Ты харизматичный ментор по смарт-мани трейдингу (SMC/ICT). "
-                    "Объясни материал ученику максимально доступно и интересно. "
-                    "Используй эмодзи (📊 💡 🎯 📉), жирный текст для терминов, списки для структуры. "
-                    "Общайся как живой наставник, не как робот. "
-                    "Если на странице нет важной теории, скажи: «На этой странице нет важной торговой теории — двигаемся дальше! ➡️»"
-                ),
-            },
-            {"role": "user", "content": f"Текст страницы:\n\n{page_text}"},
+            {"role": "system", "content": sys + (
+                "\nЕсли на странице нет важной теории — скажи: «На этой странице нет важной теории — двигаемся дальше! ➡️»"
+                if lang != "UZ" else
+                "\nAgar sahifada muhim nazariya bo'lmasa: «Bu sahifada muhim nazariya yo'q — davom etamiz! ➡️»"
+            )},
+            {"role": "user", "content": user_msg},
         ])
 
-    # ─────────────────────────────────────────────────────────────
-    #  4. Explain in simpler terms
-    # ─────────────────────────────────────────────────────────────
-    async def explain_simpler(self, page_text: str) -> str | None:
-        return await self._text([
-            {
-                "role": "system",
-                "content": (
-                    "Ты терпеливый ментор по трейдингу. Ученик не понял материал. "
-                    "Объясни тот же материал максимально ПРОСТЫМ языком, как для абсолютного новичка. "
-                    "Используй жизненные аналогии, эмодзи и пункты."
-                ),
-            },
-            {"role": "user", "content": f"Объясни попроще:\n\n{page_text}"},
-        ])
+    # ── explain_simpler ──────────────────────────────────────────────────────
+    async def explain_simpler(self, page_text: str, lang: str = "RU") -> str | None:
+        sys = self._sys(lang)
+        if lang == "UZ":
+            user_msg = f"O'quvchi materialni tushunmadi. Yangi boshlovchi uchun oddiy tilda tushuntir:\n\n{page_text}"
+        else:
+            user_msg = f"Ученик не понял материал. Объясни максимально простым языком для новичка:\n\n{page_text}"
+        return await self._text([{"role": "system", "content": sys},
+                                  {"role": "user", "content": user_msg}])
 
-    # ─────────────────────────────────────────────────────────────
-    #  5. Answer a user's trading question
-    # ─────────────────────────────────────────────────────────────
-    async def answer_question(self, question: str) -> str | None:
-        return await self._text([
-            {
-                "role": "system",
-                "content": (
-                    "Ты эксперт по смарт-мани трейдингу (SMC/ICT). "
-                    "Дай чёткий, структурированный ответ на вопрос ученика. "
-                    "Используй эмодзи, жирный текст и примеры. Кратко и по делу."
-                ),
-            },
-            {"role": "user", "content": question},
-        ])
+    # ── answer_question ──────────────────────────────────────────────────────
+    async def answer_question(self, question: str, lang: str = "RU") -> str | None:
+        sys = (
+            "Ты эксперт по SMC/ICT трейдингу. Дай чёткий HTML-ответ. "
+            "Эмодзи, <b>жирный</b> для терминов. НЕ используй ** и ###."
+            if lang != "UZ" else
+            "Siz SMC/ICT savdo mutaxassisiz. Aniq HTML javob bering. "
+            "Emoji, <b>qalin</b> atamalar uchun. ** va ### ISHLATMANG."
+        )
+        return await self._text([{"role": "system", "content": sys},
+                                  {"role": "user", "content": question}])
 
 
 # Singleton

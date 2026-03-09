@@ -1,57 +1,61 @@
-import io
 import logging
 from aiogram import Router, F, Bot
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 
 from utils.states import PracticeState
+from utils.i18n import t
 from database import Database
 from services.gemini import gemini_service
 
 practice_router = Router()
 logger = logging.getLogger(__name__)
 
+
 @practice_router.message(PracticeState.waiting_for_chart, F.photo | F.document)
 async def handle_homework_chart(message: Message, bot: Bot, state: FSMContext):
+    data    = await state.get_data()
+    lang    = (data.get("language") or "RU").upper()
     user_id = message.from_user.id
-    
+
+    # Accept photo or image document
     file_id = None
     if message.photo:
-        # Taking the highest resolution photo
         file_id = message.photo[-1].file_id
-    elif message.document and message.document.mime_type and message.document.mime_type.startswith('image/'):
+    elif (message.document and message.document.mime_type
+          and message.document.mime_type.startswith("image/")):
         file_id = message.document.file_id
     else:
-        await message.answer("❌ Пожалуйста, отправьте изображение (PNG или JPG).")
+        await message.answer(t("practice_image_only", lang))
         return
 
-    status_msg = await message.answer("🧠 Нейросеть анализирует ваш график...\n⏳ Пожалуйста, подождите.")
+    status_msg = await message.answer(t("practice_analysing", lang))
 
     try:
-        file_info = await bot.get_file(file_id)
-        downloaded_file = await bot.download_file(file_info.file_path)
-        img_bytes = downloaded_file.read()
+        file_info      = await bot.get_file(file_id)
+        downloaded     = await bot.download_file(file_info.file_path)
+        img_bytes      = downloaded.read()
+        caption        = message.caption or ""
 
-        caption = message.caption or ""
-        
-        gemini_response = await gemini_service.analyze_homework(image_bytes=img_bytes, prompt_text=caption)
-        
-        if not gemini_response:
-            await status_msg.edit_text("❌ Ошибка при обращении к нейросети. API не отвечает или перегружен.")
+        response = await gemini_service.analyze_homework(
+            image_bytes=img_bytes, prompt_text=caption, lang=lang
+        )
+
+        if not response:
+            await status_msg.edit_text(t("practice_api_error", lang))
             return
 
-        # Check for failure markers
-        response_lower = gemini_response.lower()
-        is_failed = any(marker in response_lower for marker in ["не сдал", "ошибка", "fail", "не правильн"])
-        
+        is_failed = any(m in response.lower()
+                        for m in ["доработать", "qayta ishlang", "fail", "❌"])
         await Database.record_hw_attempt(user_id, failed=is_failed)
-        
-        # Display response to user
-        await status_msg.edit_text(f"📊 <b>Результат проверки:</b>\n\n{gemini_response}")
-        
-        # Clear state
+
+        header = t("practice_result", lang)
+        await status_msg.edit_text(
+            f"{header}\n\n{response}",
+            parse_mode="HTML"
+        )
         await state.clear()
 
     except Exception as e:
-        logger.error(f"Error analyzing homework for {user_id}: {e}")
-        await status_msg.edit_text("❌ Произошла непредвиденная ошибка при проверке графика. Убедитесь, что отправили корректное изображение.")
+        logger.error(f"Practice error for {user_id}: {e}", exc_info=True)
+        await status_msg.edit_text(t("practice_error", lang))

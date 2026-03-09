@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from utils.states import StudyState
+from utils.i18n import t
 from database import Database
 from services.gemini import gemini_service
 
@@ -16,352 +17,273 @@ study_router = Router()
 logger = logging.getLogger(__name__)
 
 
-# ────────────────────────────────────────────────────────────────────────
-#  HELPERS
-# ────────────────────────────────────────────────────────────────────────
-
-def _clean_html(text: str) -> str:
-    """Convert markdown bold to HTML bold and strip leftover asterisks."""
-    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    text = text.replace("*", "")
-    return text
-
-
 def _truncate(text: str, limit: int = 4000) -> str:
     return text[:limit] + "…" if len(text) > limit else text
 
 
 def parse_pdf_pages(pdf_bytes: bytes) -> list[str]:
-    """
-    Extract text from every page of a PDF.
-    Returns an empty list if the PDF appears to be scanned (image-only).
-    No page limit.
-    """
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = []
-    for i in range(doc.page_count):
-        text = doc[i].get_text().strip()
-        if len(text) > 50:
-            pages.append(text)
+    doc   = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages = [doc[i].get_text().strip() for i in range(doc.page_count)]
     doc.close()
-    return pages  # empty list = scanned PDF
+    return [p for p in pages if len(p) > 50]
 
 
 def get_page_count(pdf_bytes: bytes) -> int:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    n = doc.page_count
+    n   = doc.page_count
     doc.close()
     return n
 
 
 def get_page_image(pdf_bytes: bytes, page_idx: int, max_side: int = 1024) -> bytes | None:
-    """
-    Render a PDF page to a compressed JPEG suitable for Vision AI APIs.
-    - Renders at 1.0x zoom for speed
-    - Resizes so the longest side is max_side px (default 1024)
-    - Saves as JPEG quality=82  → typically 150-300 KB (vs 3-8 MB raw)
-    This keeps the base64 payload small enough for free-tier Vision APIs.
-    """
+    """Render page → compress to ≤1024px JPEG (~150-300 KB)."""
     from PIL import Image
-
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         pix = doc[page_idx].get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-        # Resize so longest side <= max_side
         w, h = img.size
         if max(w, h) > max_side:
-            scale   = max_side / max(w, h)
-            new_w   = int(w * scale)
-            new_h   = int(h * scale)
-            img     = img.resize((new_w, new_h), Image.LANCZOS)
-
+            scale = max_side / max(w, h)
+            img   = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=82, optimize=True)
         result = buf.getvalue()
-        logger.info(f"Page {page_idx} image size: {len(result) // 1024} KB")
+        logger.info(f"Page {page_idx} image: {len(result) // 1024} KB")
         return result
     except Exception as e:
-        logger.error(f"Error rendering page {page_idx}: {e}", exc_info=True)
+        logger.error(f"Page render error {page_idx}: {e}", exc_info=True)
         return None
     finally:
         doc.close()
 
 
-def get_study_kb() -> InlineKeyboardBuilder:
+def get_study_kb(lang: str = "RU") -> InlineKeyboardBuilder:
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Всё понятно, идём дальше",  callback_data="next_page")
-    builder.button(text="📖 Не понял, объясни иначе",   callback_data="explain_more")
-    builder.button(text="❓ У меня вопрос (спросить)",  callback_data="ask_question_btn")
+    builder.button(text=t("btn_next_page",    lang), callback_data="next_page")
+    builder.button(text=t("btn_explain_more", lang), callback_data="explain_more")
+    builder.button(text=t("btn_ask_question", lang), callback_data="ask_question_btn")
     builder.adjust(1)
     return builder.as_markup()
 
 
 # ────────────────────────────────────────────────────────────────────────
-#  CORE: send one page (supports both text-PDF and scanned-PDF)
+#  Core: render + AI + send one page
 # ────────────────────────────────────────────────────────────────────────
 
 async def send_pdf_page(message: Message, bot: Bot, state: FSMContext):
     data         = await state.get_data()
-    current_page = data.get("current_page", 0)
+    cur          = data.get("current_page", 0)
     pages_text   = data.get("pages_text", [])
     pdf_bytes    = data.get("pdf_bytes")
-    total_pages  = data.get("total_pages", len(pages_text))
+    total        = data.get("total_pages", len(pages_text))
     is_scanned   = data.get("is_scanned", False)
-
-    if is_scanned:
-        # Scanned PDF: use page index directly
-        if current_page >= total_pages:
-            return
-    else:
-        if current_page >= len(pages_text):
-            return
+    lang         = (data.get("language") or "RU").upper()
 
     wait_msg = await bot.send_message(
         message.chat.id,
-        f"📖 Анализирую страницу {current_page + 1} из {total_pages}…"
+        t("page_analysing", lang).format(cur=cur + 1, total=total)
     )
 
     try:
-        img_bytes = await asyncio.to_thread(get_page_image, pdf_bytes, current_page)
+        img_bytes = await asyncio.to_thread(get_page_image, pdf_bytes, cur)
 
         if is_scanned:
-            # ── SCANNED PDF: Gemini reads the image and explains it ──
-            ai_response = await gemini_service.read_scanned_page(img_bytes, current_page + 1)
+            ai_response = await gemini_service.read_scanned_page(img_bytes, cur + 1, lang)
         else:
-            # ── NORMAL PDF: text → text-only LLM ──
-            page_text   = pages_text[current_page]
-            ai_response = await gemini_service.analyze_theory(page_text)
+            ai_response = await gemini_service.analyze_theory(pages_text[cur], lang)
 
         if not ai_response:
-            await wait_msg.edit_text(
-                "❌ Ошибка при запросе к AI. Проверьте API-ключи и попробуйте ещё раз."
-            )
+            await wait_msg.edit_text(t("page_ai_error", lang))
             return
 
-        html = _clean_html(ai_response)
-        text_to_send = _truncate(f"📄 <b>Страница {current_page + 1}</b>\n\n{html}")
+        page_label   = t("page_label", lang).format(n=cur + 1)
+        text_to_send = _truncate(f"{page_label}\n\n{ai_response}")
 
         await wait_msg.delete()
 
         if img_bytes:
             await bot.send_photo(
                 message.chat.id,
-                BufferedInputFile(img_bytes, filename=f"page_{current_page}.jpg")
+                BufferedInputFile(img_bytes, filename=f"page_{cur}.jpg")
             )
 
         await bot.send_message(
             message.chat.id, text_to_send,
-            reply_markup=get_study_kb(), parse_mode="HTML"
+            reply_markup=get_study_kb(lang), parse_mode="HTML"
         )
 
     except Exception as e:
-        logger.error(f"Error in send_pdf_page (page {current_page}): {e}", exc_info=True)
+        logger.error(f"send_pdf_page error (page {cur}): {e}", exc_info=True)
         try:
-            await wait_msg.edit_text("❌ Произошла ошибка при обработке страницы. Попробуйте ещё раз.")
+            await wait_msg.edit_text(t("page_error", lang))
         except Exception:
             pass
 
 
 # ────────────────────────────────────────────────────────────────────────
-#  UPLOAD HANDLER
+#  Upload
 # ────────────────────────────────────────────────────────────────────────
 
 @study_router.message(StudyState.waiting_for_pdf, F.document)
 async def handle_pdf_upload(message: Message, bot: Bot, state: FSMContext):
+    data = await state.get_data()
+    lang = (data.get("language") or "RU").upper()
+
     if message.document.mime_type != "application/pdf":
-        await message.answer("❌ Пожалуйста, отправьте файл в формате <b>PDF</b>.", parse_mode="HTML")
+        await message.answer(t("send_image_only", lang), parse_mode="HTML")
         return
 
-    status_msg = await message.answer(
-        "📥 Загружаю PDF…\n⏳ Определяю тип документа (текст или скан)."
-    )
+    status_msg = await message.answer(t("pdf_loading", lang), parse_mode="HTML")
 
     try:
         file_info  = await bot.get_file(message.document.file_id)
         downloaded = await bot.download_file(file_info.file_path)
         pdf_bytes  = downloaded.read()
 
-        # Attempt text extraction
-        pages_text   = await asyncio.to_thread(parse_pdf_pages, pdf_bytes)
-        total_pages  = await asyncio.to_thread(get_page_count, pdf_bytes)
-        is_scanned   = len(pages_text) == 0
+        pages_text  = await asyncio.to_thread(parse_pdf_pages, pdf_bytes)
+        total_pages = await asyncio.to_thread(get_page_count, pdf_bytes)
+        is_scanned  = len(pages_text) == 0
 
         if is_scanned and not __import__("config").OPENROUTER_API_KEY:
-            await status_msg.edit_text(
-                "❌ Этот PDF содержит только сканированные изображения.\n\n"
-                "Для чтения сканов нужен <b>OPENROUTER_API_KEY</b>.\n"
-                "Получите его бесплатно на <a href='https://openrouter.ai'>openrouter.ai</a> "
-                "и добавьте в Render → Environment.",
-                parse_mode="HTML"
-            )
+            await status_msg.edit_text(t("pdf_no_openrouter", lang), parse_mode="HTML")
             return
 
         if is_scanned:
-            mode_text = f"📡 Обнаружен <b>сканированный PDF</b> ({total_pages} стр.).\n🤖 Читаю через Vision AI (OpenRouter)…"
+            mode_text = t("pdf_scanned_detected", lang).format(n=total_pages)
         else:
-            mode_text = f"📄 Обнаружен текстовый PDF: <b>{len(pages_text)} стр. с теорией</b>."
+            mode_text = t("pdf_text_detected", lang).format(n=len(pages_text))
 
         await status_msg.edit_text(mode_text, parse_mode="HTML")
 
         await state.update_data(
-            pdf_bytes=pdf_bytes,
-            pages_text=pages_text,
-            current_page=0,
-            total_pages=total_pages,
-            is_scanned=is_scanned,
+            pdf_bytes=pdf_bytes, pages_text=pages_text,
+            current_page=0, total_pages=total_pages, is_scanned=is_scanned,
         )
         await state.set_state(StudyState.reading_pdf)
-
         await asyncio.sleep(1)
         await status_msg.delete()
         await send_pdf_page(message, bot, state)
 
     except Exception as e:
-        logger.error(f"Error reading PDF: {e}", exc_info=True)
-        await status_msg.edit_text(
-            "❌ Ошибка при чтении PDF. Файл может быть повреждён или зашифрован."
-        )
+        logger.error(f"PDF upload error: {e}", exc_info=True)
+        await status_msg.edit_text(t("pdf_corrupted", lang))
 
 
 # ────────────────────────────────────────────────────────────────────────
-#  NEXT PAGE
+#  Next page
 # ────────────────────────────────────────────────────────────────────────
 
 @study_router.callback_query(StudyState.reading_pdf, F.data == "next_page")
 async def on_next_page(callback: CallbackQuery, bot: Bot, state: FSMContext):
-    data         = await state.get_data()
-    current_page = data.get("current_page", 0) + 1
-    pages_text   = data.get("pages_text", [])
-    total_pages  = data.get("total_pages", len(pages_text))
-    is_scanned   = data.get("is_scanned", False)
+    data        = await state.get_data()
+    lang        = (data.get("language") or "RU").upper()
+    cur         = data.get("current_page", 0) + 1
+    pages_text  = data.get("pages_text", [])
+    total       = data.get("total_pages", len(pages_text))
+    is_scanned  = data.get("is_scanned", False)
 
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-    end_reached = current_page >= (total_pages if is_scanned else len(pages_text))
-
-    if end_reached:
-        await callback.message.answer(
-            "🎉 <b>Книга полностью изучена!</b> Отличная работа! 🏆",
-            parse_mode="HTML"
-        )
+    if cur >= (total if is_scanned else len(pages_text)):
+        await callback.message.answer(t("book_finished", lang), parse_mode="HTML")
         await Database.increment_studied_books(callback.from_user.id)
         await state.clear()
     else:
-        await state.update_data(current_page=current_page)
-        await callback.answer("Загружаю следующую страницу…")
+        await state.update_data(current_page=cur)
+        await callback.answer()
         await send_pdf_page(callback.message, bot, state)
 
 
 # ────────────────────────────────────────────────────────────────────────
-#  EXPLAIN SIMPLER
+#  Explain simpler
 # ────────────────────────────────────────────────────────────────────────
 
 @study_router.callback_query(StudyState.reading_pdf, F.data == "explain_more")
 async def on_explain_more(callback: CallbackQuery, bot: Bot, state: FSMContext):
     data       = await state.get_data()
+    lang       = (data.get("language") or "RU").upper()
     pages_text = data.get("pages_text", [])
     cur        = data.get("current_page", 0)
     is_scanned = data.get("is_scanned", False)
 
-    await callback.answer("Готовлю простое объяснение…")
-    wait_msg = await callback.message.answer("🧠 ИИ переформулирует материал простым языком…")
+    await callback.answer()
+    wait_msg = await callback.message.answer(t("explain_more_wait", lang))
 
     try:
         if is_scanned:
-            # For scanned PDFs re-render the same page and ask Vision AI to simplify
-            pdf_bytes = data.get("pdf_bytes")
-            img_bytes = await asyncio.to_thread(get_page_image, pdf_bytes, cur)
-            prompt = (
-                "Ты терпеливый ментор по трейдингу. Объясни содержимое этой страницы "
-                "максимально ПРОСТЫМ языком для абсолютного новичка. "
-                "Используй жизненные аналогии, эмодзи и структуру."
-            )
-            response = await gemini_service.read_scanned_page(img_bytes, cur + 1)
+            img  = await asyncio.to_thread(get_page_image, data.get("pdf_bytes"), cur)
+            resp = await gemini_service.read_scanned_page(img, cur + 1, lang)
         else:
-            if cur >= len(pages_text):
-                await callback.answer()
-                return
-            response = await gemini_service.explain_simpler(pages_text[cur])
+            resp = await gemini_service.explain_simpler(pages_text[cur], lang) if cur < len(pages_text) else None
 
-        if response:
-            response = _clean_html(response)
+        if resp:
+            prefix = t("explain_more_result", lang)
             await wait_msg.edit_text(
-                _truncate(f"💡 <b>Простое объяснение:</b>\n\n{response}"),
+                _truncate(f"{prefix}\n\n{resp}"),
                 parse_mode="HTML"
             )
         else:
-            await wait_msg.edit_text("❌ Не получилось сгенерировать объяснение. Попробуйте ещё раз.")
+            await wait_msg.edit_text(t("explain_more_error", lang))
 
     except Exception as e:
         logger.error(f"explain_more error: {e}", exc_info=True)
-        await wait_msg.edit_text("❌ Произошла ошибка. Попробуйте ещё раз.")
+        await wait_msg.edit_text(t("explain_more_error", lang))
 
 
 # ────────────────────────────────────────────────────────────────────────
-#  ASK QUESTION — trigger
+#  Ask question — trigger
 # ────────────────────────────────────────────────────────────────────────
 
 @study_router.callback_query(StudyState.reading_pdf, F.data == "ask_question_btn")
 async def process_ask_question_btn(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     lang = (data.get("language") or "RU").upper()
-
-    if lang == "UZ":
-        prompt_text = "❓ Тушунмаган сўзингиз ёки саволингизни ёзинг (масалан: 'Orderblock нима?'):"
-    else:
-        prompt_text = "❓ Напишите свой вопрос или термин, который вам непонятен\n<i>(например: «Что такое Ордерблок?»)</i>:"
-
-    await callback.message.answer(prompt_text, parse_mode="HTML")
+    await callback.message.answer(t("ask_question_prompt", lang), parse_mode="HTML")
     await state.set_state(StudyState.asking_question)
     await callback.answer()
 
 
 # ────────────────────────────────────────────────────────────────────────
-#  ASK QUESTION — handle answer
+#  Ask question — answer
 # ────────────────────────────────────────────────────────────────────────
 
 @study_router.message(StudyState.asking_question, F.text)
 async def process_user_question(message: Message, state: FSMContext):
-    data = await state.get_data()
-    lang = (data.get("language") or "RU").lower()   # "RU" → "ru"
-
-    wait_msg = await message.answer("🔍 Ищу ответ…")
+    data     = await state.get_data()
+    lang     = (data.get("language") or "RU").upper()
+    wait_msg = await message.answer(t("answer_searching", lang))
     answer   = None
 
-    # 1. Local NLP knowledge base (instant)
+    # 1. Local NLP first
     try:
         from services.nlp import nlp_service
-        candidate = nlp_service.get_best_trading_fact(message.text, lang)
-        # Only use NLP result if it seems relevant (not the generic fallback)
+        candidate = nlp_service.get_best_trading_fact(message.text, lang.lower())
         if candidate and "не нашел" not in candidate and "топилмади" not in candidate:
             answer = candidate
     except Exception as e:
-        logger.warning(f"NLP failed, escalating to AI: {e}")
+        logger.warning(f"NLP failed: {e}")
 
-    # 2. AI fallback (if NLP had no good match)
+    # 2. AI fallback
     if not answer:
         try:
-            answer = await gemini_service.answer_question(message.text)
+            answer = await gemini_service.answer_question(message.text, lang)
         except Exception as e:
             logger.error(f"answer_question failed: {e}")
 
     if not answer:
-        answer = "💡 Не удалось найти ответ. Попробуйте переформулировать вопрос."
+        answer = t("answer_not_found", lang)
 
+    prefix = t("answer_prefix", lang)
     try:
         await wait_msg.edit_text(
-            _truncate(f"🤖 <b>AI Ментор:</b>\n\n{_clean_html(answer)}"),
+            _truncate(f"{prefix}\n\n{answer}"),
             parse_mode="HTML"
         )
     except Exception:
-        await message.answer(
-            _truncate(f"🤖 <b>AI Ментор:</b>\n\n{_clean_html(answer)}"),
-            parse_mode="HTML"
-        )
+        await message.answer(_truncate(f"{prefix}\n\n{answer}"), parse_mode="HTML")
 
     await state.set_state(StudyState.reading_pdf)
