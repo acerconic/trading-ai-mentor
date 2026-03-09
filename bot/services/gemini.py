@@ -16,11 +16,12 @@ HTTPX_TIMEOUT = 90  # seconds
 # ─────────────────────────────────────────────────────────────────────────
 #  VISION via OpenRouter (FREE vision models — no Gemini key needed)
 # ─────────────────────────────────────────────────────────────────────────
-# These models support image input on OpenRouter for FREE:
+# Best FREE vision models on OpenRouter (ordered by quality + generosity):
 VISION_MODELS = [
-    "google/gemini-2.0-flash-exp:free",   # Gemini 2.0 Flash (free tier)
-    "qwen/qwen2.5-vl-72b-instruct:free",  # Qwen Vision 72B (free)
-    "meta-llama/llama-4-scout:free",       # Llama 4 Scout with vision
+    "google/gemini-2.0-flash-exp:free",        # Best quality vision, 1M context, FREE
+    "meta-llama/llama-4-maverick:free",         # Llama 4 Maverick, vision, FREE
+    "qwen/qwen2.5-vl-72b-instruct:free",        # Qwen VL 72B, very capable, FREE
+    "meta-llama/llama-4-scout:free",            # Llama 4 Scout, fast vision, FREE
 ]
 
 
@@ -99,14 +100,22 @@ class AIManagerService:
                 self.clients[name] = AsyncOpenAI(base_url=base_url, api_key=key)
                 logger.info(f"✅ Text provider registered: {name}")
 
-        self.text_priority = ["cerebras", "groq", "sambanova", "hyperbolic",
-                               "openrouter", "together", "mistral", "novita"]
+        self.text_priority = [
+            "groq",        # Llama 3.3 70B — very fast, generous
+            "sambanova",   # Llama 3.3 70B — fastest inference
+            "hyperbolic",  # Llama 3.3 70B — free credits
+            "openrouter",  # DeepSeek V3 — biggest context, most generous
+            "cerebras",    # fallback
+            "together",    # fallback
+            "mistral",     # fallback
+            "novita",      # fallback
+        ]
         self.text_models = {
-            "cerebras":   "llama-3.3-70b",
             "groq":       "llama-3.3-70b-versatile",
             "sambanova":  "Meta-Llama-3.3-70B-Instruct",
             "hyperbolic": "meta-llama/Llama-3.3-70B-Instruct",
-            "openrouter": "meta-llama/llama-3.3-70b-instruct:free",
+            "openrouter": "deepseek/deepseek-chat-v3-0324:free",  # 64k context, very generous FREE
+            "cerebras":   "llama-3.3-70b",
             "together":   "meta-llama/Llama-3-70b-chat-hf",
             "mistral":    "mistral-small-latest",
             "novita":     "meta-llama/llama-3.3-70b-instruct",

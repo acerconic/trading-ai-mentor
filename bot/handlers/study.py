@@ -178,7 +178,7 @@ async def handle_pdf_upload(message: Message, bot: Bot, state: FSMContext):
             return
 
         if is_scanned:
-            mode_text = f"📡 Обнаружен <b>сканированный PDF</b> ({total_pages} стр.).\nИспользую Gemini Vision для чтения…"
+            mode_text = f"📡 Обнаружен <b>сканированный PDF</b> ({total_pages} стр.).\n🤖 Читаю через Vision AI (OpenRouter)…"
         else:
             mode_text = f"📄 Обнаружен текстовый PDF: <b>{len(pages_text)} стр. с теорией</b>."
 
@@ -252,7 +252,7 @@ async def on_explain_more(callback: CallbackQuery, bot: Bot, state: FSMContext):
 
     try:
         if is_scanned:
-            # For scanned PDFs re-render the same page and ask Gemini to simplify
+            # For scanned PDFs re-render the same page and ask Vision AI to simplify
             pdf_bytes = data.get("pdf_bytes")
             img_bytes = await asyncio.to_thread(get_page_image, pdf_bytes, cur)
             prompt = (
